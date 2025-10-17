@@ -7,7 +7,7 @@ import random
 from datetime import datetime
 
 # --- 設定項目 ---
-GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzwTbz24jdyXQv1yvwsKMOW4wHbG4Jnh_7ppp_0M8SlbCkxm3-ytuHpGlvdTEUEPXS4PA/exec" 
+GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzIHJdzrPWRgu3uyOb2A1rHQTvpxzU6sLKBm5Ybwt--ozxLFe0_i7nr071RjwjgdkaxGA/exec" 
 GAS_API_KEY = "my_streamlit_secret_key_123" 
 
 # --- Streamlit アプリケーションの開始 ---
