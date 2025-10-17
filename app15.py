@@ -7,8 +7,9 @@ import random
 from datetime import datetime
 
 # --- 設定項目 ---
-GAS_WEBAPP_URL = "デプロイしたGAS WebアプリのURLをここに貼り付けてください"
-GAS_API_KEY = "YOUR_SECRET_API_KEY" # 必要なければ削除してもOKですが、GAS側がAPIキーをチェックしない設定にする必要があります。
+# ★★★ あなたのデプロイしたGAS WebアプリのURLとAPIキーに置き換える ★★★
+GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzwTbz24jdyXQv1yvwsKMOW4wHbG4Jnh_7ppp_0M8SlbCkxm3-ytmHpGlvdTEUEPXS4PA/exec" 
+GAS_API_KEY = "my_streamlit_secret_key_123" 
 
 # --- Streamlit アプリケーションの開始 ---
 st.set_page_config(layout="wide")
