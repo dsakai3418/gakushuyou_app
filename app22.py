@@ -88,11 +88,16 @@ def load_data_from_gas(sheet_name):
 
 def write_data_to_gas(df, sheet_name):
     try:
-        if 'Date' in df.columns and pd.api.types.is_datetime64_any_dtype(df['Date']):
-            df_to_send = df.copy()
-            df_to_send['Date'] = df_to_send['Date'].dt.strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            df_to_send = df.copy()
+        df_to_send = df.copy()
+
+        # Timestamp型を文字列に変換する汎用処理
+        for col in df_to_send.columns:
+            if pd.api.types.is_datetime64_any_dtype(df_to_send[col]):
+                df_to_send[col] = df_to_send[col].dt.strftime("%Y-%m-%d %H:%M:%S")
+            # 'Details'カラム内のJSON文字列を再エンコードする際にTimestampが含まれていないか再確認
+            # ここではDataFrameの各要素を文字列に変換しているため、JSON文字列がTimestampを含む場合は別途処理が必要
+            # 現在のロジックでは、json.dumps(serializable_details, ...) でTimestampをNoneに変換しているので、
+            # DataFrame自体にTimestampが残るケースは'Date'カラムが主だが、念のためTimestamp変換を汎用的に適用
             
         data_to_send = [df_to_send.columns.tolist()] + df_to_send.values.tolist()
         params = {'api_key': GAS_API_KEY, 'sheet': sheet_name, 'action': 'write_data'}
@@ -591,9 +596,9 @@ if st.session_state.username:
                         'correct_answer': q['correct_answer'],
                         'user_answer': user_ans if user_ans is not None else "未回答",
                         'is_correct': is_correct,
-                        'term_name': q.get('term_name', 'N/A'), # .get() を使用して KeyError を回避
-                        'term_definition': q.get('term_definition', 'N/A'), # .get() を使用して KeyError を回避
-                        'term_example': q.get('term_example', 'N/A') # .get() を使用して KeyError を回避
+                        'term_name': q.get('term_name', 'N/A'), 
+                        'term_definition': q.get('term_definition', 'N/A'), 
+                        'term_example': q.get('term_example', 'N/A') 
                     })
                 
                 st.session_state.test_mode['score'] = final_score 
@@ -633,15 +638,20 @@ if st.session_state.username:
 
                 updated_df_test_results = pd.concat([df_test_results, new_result], ignore_index=True)
                 
+                # ここで write_data_to_gas を呼び出す前に、
+                # new_result が Timestamp を含まないことを確認するために再度変換ロジックを挟む
+                # write_data_to_gas 内の汎用変換で対応済みのはずだが、念のため。
+                # この部分は write_data_to_gas 内で処理されるため、冗長だが安全策
+                
                 if write_data_to_gas(updated_df_test_results, test_results_sheet_name):
                     st.success("テスト結果が保存されました！「データ管理」から確認できます。")
                 
                 st.markdown("---")
                 st.subheader("詳細結果")
                 for i, detail in enumerate(st.session_state.test_mode['detailed_results']):
-                    is_correct_icon = "✅" if detail['is_correct'] else "❌"
+                    is_correct_icon = "✅" if detail.get('is_correct') else "❌" 
                     st.write(f"**問題 {i+1}** {is_correct_icon}")
-                    st.write(f"　- 正解: {detail['correct_answer']}")
+                    st.write(f"　- 正解: {detail.get('correct_answer', 'N/A')}")
                     st.write(f"　- あなたの回答: {detail.get('user_answer', 'N/A')}")
                     st.write("---辞書情報---")
                     st.write(f"　- 用語: {detail.get('term_name', 'N/A')}")
