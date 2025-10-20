@@ -4,11 +4,18 @@ import requests
 import json
 import os
 import random
-from datetime import datetime
+from datetime import datetime, date # date型もインポート
 
 # --- 設定項目 ---
-GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzIHJdzrPWRgu3uyOb2A1rHQTvpxzU6sLKBm5Ybwt--ozxLFe0_i7nr071RjwjgdkaxGA/exec" 
-GAS_API_KEY = "my_streamlit_secret_key_123" 
+# GAS_WEBAPP_URL と GAS_API_KEY は Streamlit Secrets を推奨しますが、
+# ここでは直接記述された値を保持します。
+# 実際には st.secrets["gas_webapp_url"] などを使用してください。
+GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzIHJdzrPWRgu3uyOb2A1rHQTvpxzU6sLKBm5Ybwt--ozxLFe0_i7nr071RjwjgdkaxGA/exec"
+GAS_API_KEY = "my_streamlit_secret_key_123"
+
+# ヘッダー定義
+VOCAB_HEADERS = ['ID', '用語 (Term)', '説明 (Definition)', '例文 (Example)', 'カテゴリ (Category)', '学習進捗 (Progress)']
+TEST_RESULTS_HEADERS = ['Date', 'Category', 'TestType', 'Score', 'TotalQuestions', 'Details']
 
 # --- Streamlit アプリケーションの開始 ---
 st.set_page_config(layout="wide")
@@ -18,6 +25,14 @@ if 'username' not in st.session_state:
     st.session_state.username = None
 
 # --- GAS APIとの連携関数 ---
+# カスタムJSONエンコーダー
+def json_serial_for_gas(obj):
+    """datetime, date, Pandas TimestampオブジェクトをISOフォーマット文字列に変換するカスタムJSONシリアライザー"""
+    if isinstance(obj, (datetime, pd.Timestamp, date)):
+        return obj.isoformat()
+    # 他のシリアライズできない型が誤って混入した場合のために例外を発生させる
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
 @st.cache_data(ttl=60)
 def load_data_from_gas(sheet_name):
     try:
@@ -28,50 +43,83 @@ def load_data_from_gas(sheet_name):
         data = response.json()
 
         if 'error' in data:
-            # GASが「シートが見つかりません」という特定のエラーを返した場合、空のDataFrameを返す
             if "シートが見つかりません" in data['error'] or "Sheet not found" in data['error']:
                 st.info(f"スプレッドシートに '{sheet_name}' が見つかりませんでした。新しく作成されます。")
                 if sheet_name.startswith("Sheet_TestResults_"):
-                    return pd.DataFrame(columns=['Date', 'Category', 'TestType', 'Score', 'TotalQuestions', 'Details'])
+                    return pd.DataFrame(columns=TEST_RESULTS_HEADERS)
                 else:
-                    return pd.DataFrame(columns=['ID', '用語 (Term)', '説明 (Definition)', '例文 (Example)', 'カテゴリ (Category)', '学習進捗 (Progress)'])
+                    return pd.DataFrame(columns=VOCAB_HEADERS)
             else:
-                # その他のGASからのエラーは通常のエラーとして処理
                 st.error(f"GASからエラーが返されました: {data['error']}")
                 st.stop()
         
-        df = pd.DataFrame(data['data'])
-        
-        if not sheet_name.startswith("Sheet_TestResults_"):
-            expected_cols = ['ID', '用語 (Term)', '説明 (Definition)', '例文 (Example)', 'カテゴリ (Category)', '学習進捗 (Progress)']
-            for col in expected_cols:
-                if col not in df.columns:
-                    df[col] = ''
-            df = df[expected_cols]
-            df = df.dropna(how='all')
-
-            if 'ID' not in df.columns or df['ID'].isnull().all():
-                df['ID'] = range(1, len(df) + 1)
+        # 'data'キーが存在しないか、空のリストが返された場合
+        if 'data' not in data or not data['data']:
+            if sheet_name.startswith("Sheet_TestResults_"):
+                return pd.DataFrame(columns=TEST_RESULTS_HEADERS)
             else:
-                df['ID'] = pd.to_numeric(df['ID'], errors='coerce').fillna(0).astype(int)
-                df = df.sort_values(by='ID').reset_index(drop=True)
+                return pd.DataFrame(columns=VOCAB_HEADERS)
+
+        # GASからのデータはヘッダー行を含むリストのリストとして期待
+        gas_values = data['data']
+        if not gas_values: # データ本体が空の場合
+             if sheet_name.startswith("Sheet_TestResults_"):
+                 return pd.DataFrame(columns=TEST_RESULTS_HEADERS)
+             else:
+                 return pd.DataFrame(columns=VOCAB_HEADERS)
+
+        # ヘッダーとデータ本体を分離
+        header = gas_values[0]
+        rows = gas_values[1:]
+
+        # ヘッダーが定義済みのヘッダーと一致するかチェック（完全一致でなくても良いが、主要カラムは必要）
+        # ただしGAS側でヘッダーが常に設定されるため、ここでは主にデータ型変換に注力
+        
+        df = pd.DataFrame(rows, columns=header)
+
+        if not sheet_name.startswith("Sheet_TestResults_"):
+            # 用語シートのデータ型変換
+            for col in VOCAB_HEADERS:
+                if col not in df.columns:
+                    df[col] = pd.NA # 欠損カラムを追加
+            df = df[VOCAB_HEADERS] # カラム順を統一
+
+            df['ID'] = pd.to_numeric(df['ID'], errors='coerce').fillna(0).astype('Int64')
+            df['学習進捗 (Progress)'] = df['学習進捗 (Progress)'].fillna('Not Started')
+            df['例文 (Example)'] = df['例文 (Example)'].fillna('')
+            df = df.dropna(subset=['用語 (Term)', '説明 (Definition)'], how='all') # 用語と説明が両方NaNの行は削除
+            df = df.drop_duplicates(subset=['用語 (Term)', '説明 (Definition)'], keep='first') # 重複行の削除
+            df = df.sort_values(by='ID').reset_index(drop=True)
+            
         else: # テスト結果シートの場合
-            if 'Date' in df.columns and not df['Date'].empty:
+            for col in TEST_RESULTS_HEADERS:
+                if col not in df.columns:
+                    df[col] = pd.NA # 欠損カラムを追加
+            df = df[TEST_RESULTS_HEADERS] # カラム順を統一
+
+            if 'Date' in df.columns:
                 df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
                 df = df.dropna(subset=['Date']) 
                 if not df.empty:
                     df = df.sort_values(by='Date', ascending=False).reset_index(drop=True)
+            
+            # 'Details'カラムのJSON文字列をパース
+            if 'Details' in df.columns and not df.empty:
+                def parse_json_safely(json_str):
+                    if pd.isna(json_str) or not isinstance(json_str, str) or not json_str.strip():
+                        return [] # NaN, 空文字列, 非文字列の場合は空リスト
+                    try:
+                        return json.loads(json_str)
+                    except (json.JSONDecodeError, TypeError):
+                        st.warning(f"テスト結果の詳細データをJSONとしてパースできませんでした: {json_str[:100]}...")
+                        return [] # パース失敗時は空リスト
+                df['Details'] = df['Details'].apply(parse_json_safely)
             else:
-                if df.empty:
-                    return pd.DataFrame(columns=['Date', 'Category', 'TestType', 'Score', 'TotalQuestions', 'Details'])
-                else:
-                    # 'Date'カラムがないか空の場合も、DataFrame自体は返す
-                    st.warning(f"テスト結果シート '{sheet_name}' に 'Date' カラムが見つからないか空です。")
-                    return df 
+                df['Details'] = [[] for _ in range(len(df))] # Detailsカラムがない場合は空のリストで初期化
+
 
         return df
     except requests.exceptions.HTTPError as e:
-        # HTTP 500などのサーバーエラーはこちらで捕捉
         st.error(f"GAS Webアプリへの接続に失敗しました: {e}")
         st.info(f"GAS WebアプリのURL: {GAS_WEBAPP_URL} が正しいか、デプロイされているか、またはGAS側のスクリプトにエラーがないか確認してください。")
         st.stop()
@@ -90,16 +138,32 @@ def write_data_to_gas(df, sheet_name):
     try:
         df_to_send = df.copy()
 
-        # Timestamp型を文字列に変換する汎用処理
-        for col in df_to_send.columns:
-            if pd.api.types.is_datetime64_any_dtype(df_to_send[col]):
-                df_to_send[col] = df_to_send[col].dt.strftime("%Y-%m-%d %H:%M:%S")
-            # 'Details'カラム内のJSON文字列を再エンコードする際にTimestampが含まれていないか再確認
-            # ここではDataFrameの各要素を文字列に変換しているため、JSON文字列がTimestampを含む場合は別途処理が必要
-            # 現在のロジックでは、json.dumps(serializable_details, ...) でTimestampをNoneに変換しているので、
-            # DataFrame自体にTimestampが残るケースは'Date'カラムが主だが、念のためTimestamp変換を汎用的に適用
-            
-        data_to_send = [df_to_send.columns.tolist()] + df_to_send.values.tolist()
+        # PandasのInt64型をintに、NaNをNoneに変換
+        for col in df_to_send.select_dtypes(include='Int64').columns:
+            df_to_send[col] = df_to_send[col].apply(lambda x: int(x) if pd.notna(x) else None)
+        
+        # 各セルをGASで処理しやすい形式に変換
+        processed_data_rows = []
+        for _, row in df_to_send.iterrows():
+            processed_row = []
+            for item in row.values:
+                if pd.isna(item): # PandasのNaNはNoneに変換
+                    processed_row.append(None)
+                elif isinstance(item, (datetime, pd.Timestamp, date)): # datetimeオブジェクトやTimestamp、dateをISO文字列に変換
+                    processed_row.append(item.isoformat())
+                elif isinstance(item, (list, dict)): # リストや辞書はJSON文字列にする
+                    try:
+                        # json_serial_for_gas を default として使用し、内部のdatetimeも変換
+                        processed_row.append(json.dumps(item, ensure_ascii=False, default=json_serial_for_gas))
+                    except TypeError as e:
+                        st.error(f"JSONシリアライズエラー: {e} - 問題のデータ: {item}")
+                        processed_row.append(str(item)) # シリアライズできない場合は文字列として送信
+                else:
+                    processed_row.append(item)
+            processed_data_rows.append(processed_row)
+
+        data_to_send = [df_to_send.columns.tolist()] + processed_data_rows
+        
         params = {'api_key': GAS_API_KEY, 'sheet': sheet_name, 'action': 'write_data'}
         headers = {'Content-Type': 'application/json'}
         response = requests.post(GAS_WEBAPP_URL, params=params, headers=headers, json={'data': data_to_send})
@@ -111,7 +175,7 @@ def write_data_to_gas(df, sheet_name):
             return False
         
         st.success(f"データがスプレッドシート '{sheet_name}' に保存されました！")
-        st.cache_data.clear()
+        st.cache_data.clear() # キャッシュをクリアして次回読み込み時に最新データを取得
         return True
     except requests.exceptions.RequestException as e:
         st.error(f"GAS Webアプリへの書き込み接続に失敗しました: {e}")
@@ -192,29 +256,36 @@ if st.session_state.username:
         if eligible_vocab_df.empty or len(eligible_vocab_df) < num_questions:
             return None 
         
-        selected_terms = eligible_vocab_df.sample(n=num_questions, replace=False)
+        # replace=Falseで重複なし、n=num_questionsで指定数
+        # num_questionsが利用可能な用語数より大きい場合はエラーになるのでminで調整
+        actual_num_questions = min(num_questions, len(eligible_vocab_df))
+        if actual_num_questions == 0:
+            return None
+
+        selected_terms = eligible_vocab_df.sample(n=actual_num_questions, replace=False, random_state=random.randint(0, 10000))
         
         questions_list = []
         for _, question_term_row in selected_terms.iterrows():
             correct_answer = ""
             question_text = ""
-            all_options_pool = []
+            all_options_pool = [] # 誤答選択肢のプール
 
             if test_type == 'term_to_def':
                 question_text = question_term_row['用語 (Term)']
                 correct_answer = question_term_row['説明 (Definition)']
-                all_options_pool = eligible_vocab_df['説明 (Definition)'].tolist()
+                all_options_pool = eligible_vocab_df['説明 (Definition)'].dropna().unique().tolist()
             elif test_type == 'example_to_term':
                 question_text = question_term_row['例文 (Example)']
                 correct_answer = question_term_row['用語 (Term)']
-                all_options_pool = eligible_vocab_df['用語 (Term)'].tolist()
+                all_options_pool = eligible_vocab_df['用語 (Term)'].dropna().unique().tolist()
             
-            incorrect_choices = []
+            # 正解を誤答プールから除外
             possible_incorrects = [opt for opt in all_options_pool if opt != correct_answer]
             
+            incorrect_choices = []
             if len(possible_incorrects) >= 3:
                 incorrect_choices = random.sample(possible_incorrects, 3)
-            else:
+            elif possible_incorrects: # 3つ未満でもあれば全て使う
                 incorrect_choices = possible_incorrects
             
             choices = [correct_answer] + incorrect_choices
@@ -237,15 +308,20 @@ if st.session_state.username:
         st.session_state.test_mode['test_type'] = test_type
         st.session_state.test_mode['question_source'] = question_source
         st.session_state.test_mode['selected_category'] = category_filter
-        st.session_state.test_mode['questions'] = generate_questions_for_test(test_type, question_source, category_filter, num_questions=10)
-        st.session_state.test_mode['current_question_index'] = 0 
-        st.session_state.test_mode['score'] = 0
-        st.session_state.test_mode['answers'] = [None] * len(st.session_state.test_mode['questions']) if st.session_state.test_mode['questions'] else []
-        st.session_state.test_mode['detailed_results'] = []
         
-        if st.session_state.test_mode['questions'] is None or not st.session_state.test_mode['questions']:
+        generated_questions = generate_questions_for_test(test_type, question_source, category_filter, num_questions=10)
+        
+        if generated_questions is None or not generated_questions:
             st.error("テスト問題を作成できませんでした。出題条件を満たす用語が不足している可能性があります。")
             st.session_state.test_mode['is_active'] = False
+            return # テスト開始を中断
+
+        st.session_state.test_mode['questions'] = generated_questions
+        st.session_state.test_mode['current_question_index'] = 0 
+        st.session_state.test_mode['score'] = 0
+        st.session_state.test_mode['answers'] = [None] * len(st.session_state.test_mode['questions'])
+        st.session_state.test_mode['detailed_results'] = []
+        
         st.rerun()
 
     # --- テストモードの再開 ---
@@ -274,8 +350,13 @@ if st.session_state.username:
                 filtered_df = filtered_df[filtered_df['カテゴリ (Category)'] == selected_category]
             search_term = st.text_input("用語や説明を検索:")
             if search_term:
+                search_lower = search_term.lower()
                 filtered_df = filtered_df[
-                    filtered_df.apply(lambda row: search_term.lower() in str(row).lower(), axis=1)
+                    filtered_df.apply(lambda row: 
+                                      search_lower in str(row['用語 (Term)']).lower() or
+                                      search_lower in str(row['説明 (Definition)']).lower() or
+                                      (pd.notna(row['例文 (Example)']) and search_lower in str(row['例文 (Example)']).lower()), 
+                                      axis=1)
                 ]
             st.dataframe(filtered_df, use_container_width=True, hide_index=True)
         else:
@@ -287,6 +368,7 @@ if st.session_state.username:
             new_term = st.text_input("用語 (Term)*", help="例: Burn Rate")
             new_definition = st.text_area("説明 (Definition)*", help="例: キャッシュを消費する速度。通常、月単位で測定される。")
             new_example = st.text_area("例文 (Example)", help="例: 「スタートアップは高いBurn Rateを維持しているため、追加の資金調達が必要だ。」")
+            
             existing_categories = sorted(df_vocab['カテゴリ (Category)'].dropna().unique().tolist())
             selected_category = st.selectbox("カテゴリ (Category)", 
                                              options=['新しいカテゴリを作成'] + existing_categories)
@@ -295,6 +377,7 @@ if st.session_state.username:
                 category_to_add = new_category
             else:
                 category_to_add = selected_category
+            
             submitted = st.form_submit_button("用語を追加")
             if submitted:
                 if new_term and new_definition and category_to_add:
@@ -324,12 +407,14 @@ if st.session_state.username:
                     edited_term = st.text_input("用語 (Term)*", value=selected_term_data['用語 (Term)'])
                     edited_definition = st.text_area("説明 (Definition)*", value=selected_term_data['説明 (Definition)'])
                     edited_example = st.text_area("例文 (Example)", value=selected_term_data['例文 (Example)'])
+                    
                     existing_categories_for_edit = sorted(df_vocab['カテゴリ (Category)'].dropna().unique().tolist())
                     try:
                         current_category_index = existing_categories_for_edit.index(selected_term_data['カテゴリ (Category)'])
-                        default_index_for_selectbox = current_category_index + 1
+                        default_index_for_selectbox = current_category_index + 1 # '新しいカテゴリを作成' の分オフセット
                     except ValueError:
-                        default_index_for_selectbox = 0
+                        default_index_for_selectbox = 0 # カテゴリが見つからない場合は先頭
+
                     edited_selected_category = st.selectbox("カテゴリ (Category)", 
                                                             options=['新しいカテゴリを作成'] + existing_categories_for_edit,
                                                             index=default_index_for_selectbox) 
@@ -339,9 +424,12 @@ if st.session_state.username:
                         category_to_save = edited_new_category
                     else:
                         category_to_save = edited_selected_category
-                    edited_progress = st.selectbox("学習進捗 (Progress)", 
-                                                   options=['Not Started', 'Learning', 'Mastered'],
-                                                   index=['Not Started', 'Learning', 'Mastered'].index(selected_term_data['学習進捗 (Progress)']))
+                    
+                    # 学習進捗はGAS側でデフォルト値を持つため、ここでは編集しない
+                    # edited_progress = st.selectbox("学習進捗 (Progress)", 
+                    #                                options=['Not Started', 'Learning', 'Mastered'],
+                    #                                index=['Not Started', 'Learning', 'Mastered'].index(selected_term_data['学習進捗 (Progress)']))
+                    
                     col_edit, col_delete = st.columns(2)
                     edit_submitted = col_edit.form_submit_button("更新")
                     delete_submitted = col_delete.form_submit_button("削除")
@@ -352,7 +440,7 @@ if st.session_state.username:
                             df_vocab.loc[idx, '説明 (Definition)'] = edited_definition
                             df_vocab.loc[idx, '例文 (Example)'] = edited_example
                             df_vocab.loc[idx, 'カテゴリ (Category)'] = category_to_save
-                            df_vocab.loc[idx, '学習進捗 (Progress)'] = edited_progress
+                            # df_vocab.loc[idx, '学習進捗 (Progress)'] = edited_progress # 学習進捗は編集しない
                             if write_data_to_gas(df_vocab, current_worksheet_name):
                                 st.success(f"用語 '{edited_term}' が更新されました！")
                                 st.rerun()
@@ -404,8 +492,9 @@ if st.session_state.username:
             st.session_state.learning_mode['progress_filter'] = selected_progress_filter
             st.session_state.learning_mode['filtered_df_indices'] = filtered_df.index.tolist()
             st.session_state.learning_mode['current_index_in_filtered'] = 0
-            if not filtered_df.empty: # フィルタリング結果が空でない場合のみrerun
-                st.rerun()
+            # フィルタリング結果が空でない場合のみrerun
+            # filtered_df.empty のチェックは以下の if filtered_df.empty: で処理
+            st.rerun()
 
         # filtered_dfが空だった場合の処理
         if filtered_df.empty:
@@ -418,14 +507,14 @@ if st.session_state.username:
         current_display_index_in_filtered = st.session_state.learning_mode['current_index_in_filtered']
 
         # 現在のインデックスが範囲外にならないように調整 (フィルタリング結果が変わった場合など)
-        if not st.session_state.learning_mode['filtered_df_indices'] or \
-           current_display_index_in_filtered >= len(st.session_state.learning_mode['filtered_df_indices']):
+        if current_display_index_in_filtered >= total_terms_in_filtered:
             st.session_state.learning_mode['current_index_in_filtered'] = 0
             current_display_index_in_filtered = 0 # 再度設定
-            st.rerun() # リセットして再描画
+            # filtered_df.empty のチェックは済んでいるので、ここは問題ない
+            # st.rerun() はここで不要、下の term_data の取得で正しいデータがロードされる
 
         original_idx = st.session_state.learning_mode['filtered_df_indices'][current_display_index_in_filtered]
-        current_term_data = df_vocab.loc[original_idx]
+        current_term_data = df_vocab.loc[original_idx] # オリジナルのdf_vocabからデータを取得
 
         st.markdown("---")
         st.subheader(f"現在表示中: {current_display_index_in_filtered + 1} / {total_terms_in_filtered}")
@@ -500,7 +589,16 @@ if st.session_state.username:
             st.markdown("---")
             st.subheader(f"検索結果 ({len(filtered_df)} 件)")
             for _, row in filtered_df.iterrows():
-                is_expanded = (st.session_state.dictionary_mode['expanded_term_id'] == row['ID'])
+                # expander の key に一意な ID を使用
+                expander_key = f"expander_{row['ID']}"
+                
+                # expanded 状態を制御するためのボタンも同じIDを使う
+                if st.session_state.dictionary_mode['expanded_term_id'] == row['ID']:
+                    # 展開されている状態で、詳細を見るボタンを押させない
+                    is_expanded = True
+                else:
+                    is_expanded = False
+
                 with st.expander(f"**{row['用語 (Term)']}.** （カテゴリ: {row['カテゴリ (Category)']}）", 
                                   expanded=is_expanded):
                     st.write(f"### 説明")
@@ -509,14 +607,15 @@ if st.session_state.username:
                         st.write(f"### 例文")
                         st.markdown(f"*{row['例文 (Example)']}*")
                     
-                    if is_expanded:
-                        if st.button("閉じる", key=f"close_{row['ID']}"):
-                            st.session_state.dictionary_mode['expanded_term_id'] = None
-                            st.rerun()
-                    else:
-                        if st.button("詳細を見る", key=f"open_{row['ID']}"):
-                            st.session_state.dictionary_mode['expanded_term_id'] = row['ID']
-                            st.rerun()
+                    if st.button("閉じる", key=f"close_dict_{row['ID']}"):
+                        st.session_state.dictionary_mode['expanded_term_id'] = None
+                        st.rerun()
+                
+                # expanderの外に詳細を見るボタンを配置して、expanded_term_idを更新する
+                if not is_expanded:
+                    if st.button("詳細を見る", key=f"open_dict_{row['ID']}"):
+                        st.session_state.dictionary_mode['expanded_term_id'] = row['ID']
+                        st.rerun()
                 st.markdown("---") 
 
     elif page == "テストモード":
@@ -567,7 +666,7 @@ if st.session_state.username:
             current_idx = st.session_state.test_mode['current_question_index']
             total_questions = len(questions)
 
-            # 問題が生成されなかった場合
+            # 問題が生成されなかった場合 (start_new_test でチェック済みだが念のため)
             if not questions:
                 st.error("この条件でテスト問題を作成できませんでした。用語の数や例文の有無を確認してください。")
                 if st.button("テストを終了する", key="end_test_no_q"):
@@ -584,7 +683,7 @@ if st.session_state.username:
                 st.subheader("テスト結果")
                 
                 final_score = 0
-                st.session_state.test_mode['detailed_results'] = []
+                st.session_state.test_mode['detailed_results'] = [] # 結果集計前にクリア
                 for i, q in enumerate(questions):
                     user_ans = st.session_state.test_mode['answers'][i]
                     is_correct = (user_ans == q['correct_answer'])
@@ -605,7 +704,7 @@ if st.session_state.username:
                 
                 st.write(f"お疲れ様でした！あなたの最終スコアは **{final_score} / {total_questions}** です。")
                 
-                test_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                test_date_obj = datetime.now() # datetimeオブジェクトのまま保持
                 category_used = st.session_state.test_mode['selected_category']
                 if st.session_state.test_mode['question_source'] == 'all_random':
                     category_used = '全カテゴリ' 
@@ -615,48 +714,23 @@ if st.session_state.username:
                     'example_to_term': '例文→用語'
                 }[st.session_state.test_mode['test_type']]
 
-                # JSONシリアライズ可能にするために、詳細結果をコピーして辞書に変換
-                serializable_details = []
-                for detail_item in st.session_state.test_mode['detailed_results']:
-                    # ここではPandas Timestampは発生しない想定だが、
-                    # もし万が一混入した場合に備え、None変換とDatetimeオブジェクトの変換を強化
-                    serializable_item = {}
-                    for k, v in detail_item.items():
-                        if pd.isna(v): # PandasのNaNはNoneに変換
-                            serializable_item[k] = None
-                        elif isinstance(v, (datetime, pd.Timestamp)): # datetimeオブジェクトやTimestampを文字列に変換
-                            serializable_item[k] = v.strftime("%Y-%m-%d %H:%M:%S")
-                        else:
-                            serializable_item[k] = v
-                    serializable_details.append(serializable_item)
-
-                # json.dumps に default 引数を追加し、もしTimestamp型が残っていても変換するようにする
-                def json_serial(obj):
-                    if isinstance(obj, (datetime, pd.Timestamp)):
-                        return obj.strftime("%Y-%m-%d %H:%M:%S")
-                    raise TypeError ("Type %s not serializable" % type(obj))
-
-                test_details_str = json.dumps(serializable_details, ensure_ascii=False, default=json_serial)
-
+                # new_result を作成。Details はPythonオブジェクトのリストのまま。
                 new_result = pd.DataFrame([{
-                    'Date': test_date, # test_date は既に文字列形式
+                    'Date': test_date_obj, # datetimeオブジェクトのまま格納
                     'Category': category_used,
                     'TestType': test_type_display,
                     'Score': final_score,
                     'TotalQuestions': total_questions,
-                    'Details': test_details_str
+                    'Details': st.session_state.test_mode['detailed_results'] # Pythonオブジェクトのリストのまま格納
                 }])
                 
                 if df_test_results.empty:
-                    df_test_results = pd.DataFrame(columns=['Date', 'Category', 'TestType', 'Score', 'TotalQuestions', 'Details'])
+                    df_test_results = pd.DataFrame(columns=TEST_RESULTS_HEADERS)
 
                 updated_df_test_results = pd.concat([df_test_results, new_result], ignore_index=True)
                 
-                # ここで write_data_to_gas を呼び出す前に、
-                # new_result が Timestamp を含まないことを確認するために再度変換ロジックを挟む
-                # write_data_to_gas 内の汎用変換で対応済みのはずだが、念のため。
-                # この部分は write_data_to_gas 内で処理されるため、冗長だが安全策
-                
+                # write_data_to_gas 関数がdatetimeやlist/dictを適切に処理するように修正済みなので、
+                # ここではPandas DataFrameとして渡すだけで良い
                 if write_data_to_gas(updated_df_test_results, test_results_sheet_name):
                     st.success("テスト結果が保存されました！「データ管理」から確認できます。")
                 
@@ -665,6 +739,7 @@ if st.session_state.username:
                 for i, detail in enumerate(st.session_state.test_mode['detailed_results']):
                     is_correct_icon = "✅" if detail.get('is_correct') else "❌" 
                     st.write(f"**問題 {i+1}** {is_correct_icon}")
+                    st.write(f"　- 問題文: {detail.get('question_text', 'N/A')}")
                     st.write(f"　- 正解: {detail.get('correct_answer', 'N/A')}")
                     st.write(f"　- あなたの回答: {detail.get('user_answer', 'N/A')}")
                     st.write("---辞書情報---")
@@ -695,7 +770,10 @@ if st.session_state.username:
                 with st.form(key=f"question_form_{current_idx}"):
                     default_choice_index = 0
                     if st.session_state.test_mode['answers'][current_idx] in current_question['choices']:
-                        default_choice_index = current_question['choices'].index(st.session_state.test_mode['answers'][current_idx])
+                        try:
+                            default_choice_index = current_question['choices'].index(st.session_state.test_mode['answers'][current_idx])
+                        except ValueError:
+                            default_choice_index = 0 # 選択肢が変更された場合などに備え
                     
                     selected_choice = st.radio("選択肢:", current_question['choices'], 
                                                key=f"radio_{current_idx}",
@@ -712,6 +790,31 @@ if st.session_state.username:
                         else:
                             st.error(f"不正解... 😭 正解は: **{current_question['correct_answer']}**")
                         
+                        # 学習進捗の更新 (テストモード内での簡易更新)
+                        original_df_index = df_vocab[df_vocab['ID'] == current_question['term_id']].index
+                        if not original_df_index.empty:
+                            row_idx = original_df_index[0]
+                            current_progress = df_vocab.loc[row_idx, '学習進捗 (Progress)']
+                            
+                            # 進捗を Not Started -> Learning -> Mastered に更新
+                            if is_correct_current_q:
+                                if current_progress == 'Not Started':
+                                    df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Learning'
+                                elif current_progress == 'Learning':
+                                    df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Mastered'
+                            else: # 不正解の場合、進捗を戻す
+                                if current_progress == 'Mastered':
+                                    df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Learning'
+                                elif current_progress == 'Learning':
+                                    df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Not Started'
+                            
+                            # 更新されたdf_vocabをGASに書き込む
+                            if write_data_to_gas(df_vocab, current_worksheet_name):
+                                # st.info(f"用語 '{current_question['term_name']}' の学習進捗が更新されました。")
+                                pass # メッセージは抑制
+                            else:
+                                st.warning(f"用語 '{current_question['term_name']}' の学習進捗更新に失敗しました。")
+
                         st.session_state.test_mode['current_question_index'] += 1
                         st.rerun() 
                 
@@ -772,24 +875,24 @@ if st.session_state.username:
         if not df_test_results.empty:
             df_test_results_display = df_test_results.copy()
             
-            # 'Details' カラムが存在するかチェックし、存在しない場合は空のリストをデフォルトとする
-            if 'Details' not in df_test_results_display.columns:
-                df_test_results_display['Details'] = '[]' # デフォルト値を設定
-
-            df_test_results_display['Date'] = df_test_results_display['Date'].dt.strftime("%Y-%m-%d %H:%M:%S")
+            # 'Date'カラムを表示用にフォーマット
+            df_test_results_display['Date_Display'] = df_test_results_display['Date'].dt.strftime("%Y-%m-%d %H:%M:%S")
             
             for idx, row in df_test_results_display.iterrows():
-                with st.expander(f"テスト日時: {row['Date']} | カテゴリ: {row['Category']} | 形式: {row['TestType']} | スコア: {row['Score']} / {row['TotalQuestions']}"):
+                with st.expander(f"テスト日時: {row['Date_Display']} | カテゴリ: {row['Category']} | 形式: {row['TestType']} | スコア: {row['Score']} / {row['TotalQuestions']}"):
                     st.write(f"---")
                     st.write(f"**テスト詳細:**")
-                    try:
-                        # json.loads() の前に NaN チェック
-                        details_str = row['Details']
-                        details = json.loads(details_str) if pd.notna(details_str) and details_str.strip() else []
+                    
+                    # 'Details'カラムは既にPythonオブジェクト（リスト）としてロードされていることを想定
+                    details = row['Details'] if isinstance(row['Details'], list) else []
 
+                    if not details:
+                        st.info("このテストには詳細な結果が記録されていません。")
+                    else:
                         for i, detail in enumerate(details):
                             is_correct_icon = "✅" if detail.get('is_correct') else "❌" # .get() を使用
                             st.write(f"**問題 {i+1}** {is_correct_icon}")
+                            st.write(f"　- 問題文: {detail.get('question_text', 'N/A')}")
                             st.write(f"　- 正解: {detail.get('correct_answer', 'N/A')}")
                             st.write(f"　- あなたの回答: {detail.get('user_answer', 'N/A')}")
                             st.write("---辞書情報---") 
@@ -799,14 +902,17 @@ if st.session_state.username:
                             if example != 'N/A' and example != '':
                                 st.write(f"　- 例文: {example}")
                             st.markdown("---")
-                    except json.JSONDecodeError as json_err:
-                        st.error(f"テスト詳細の読み込み中にJSON解析エラーが発生しました: {json_err}。データが破損している可能性があります。元のデータ: {row['Details']}")
-                    except Exception as e:
-                        st.error(f"テスト詳細の表示中に予期せぬエラーが発生しました: {e}")
             
             st.markdown("---")
             if st.button("CSVでダウンロード (テスト結果)"):
-                csv_test_results = df_test_results_display.to_csv(index=False).encode('utf-8')
+                # ダウンロード用にはDetailsをJSON文字列に戻す
+                df_test_results_download = df_test_results.copy()
+                df_test_results_download['Details'] = df_test_results_download['Details'].apply(
+                    lambda x: json.dumps(x, ensure_ascii=False, default=json_serial_for_gas) if isinstance(x, list) else '[]'
+                )
+                df_test_results_download['Date'] = df_test_results_download['Date'].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+                csv_test_results = df_test_results_download.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="テスト結果をダウンロード",
                     data=csv_test_results,
