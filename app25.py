@@ -151,13 +151,14 @@ def load_data_from_gas(sheet_name):
         st.exception(e) # デバッグ用
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
 
-# === write_data_to_gas 関数を全面的に刷新 ===
+# === write_data_to_gas 関数を全面的に刷新 (default引数を除去) ===
 def write_data_to_gas(df, sheet_name, action='write_data'):
     try:
         # DataFrameをJSON文字列に変換
-        # date_format='iso' で日付をISO形式に、default=json_serial_for_gas でカスタムシリアライザーを適用
+        # date_format='iso' で日付をISO形式に変換する。
+        # default引数はPandasの古いバージョンでサポートされていないため除去。
         # force_ascii=False で日本語文字がエスケープされないようにする
-        df_json_str = df.to_json(orient='split', date_format='iso', default=json_serial_for_gas, force_ascii=False)
+        df_json_str = df.to_json(orient='split', date_format='iso', force_ascii=False)
         
         # GASに送信するデータペイロードを構築
         payload = {
@@ -171,9 +172,6 @@ def write_data_to_gas(df, sheet_name, action='write_data'):
         st.sidebar.write(f"DEBUG: Action: {action}, Sheet: {sheet_name}")
 
         headers = {'Content-Type': 'application/json'}
-        # requests.post の jsonパラメータを使用すると、Pythonオブジェクトが自動的にJSONにシリアライズされる
-        # しかし、今回はdataキーにすでにJSON文字列を格納しているので、dataとして文字列を送信
-        # GAS側で data:JSON.parse(e.postData.contents).data を期待するため、payload全体をjsonとして送る
         response = requests.post(GAS_WEBAPP_URL, headers=headers, json=payload)
         response.raise_for_status()
         result = response.json()
@@ -199,6 +197,8 @@ def write_data_to_gas(df, sheet_name, action='write_data'):
         st.error(f"データの書き込み中に予期せぬエラーが発生しました: {e}")
         st.exception(e) # デバッグ用
         return False
+
+# json_serial_for_gas 関数は、この修正では直接使用されないため、削除しても問題ありませんが、残しておいても影響はありません。
 
 # --- ユーザーがログインしているかどうかにかかわらず、Welcomeページは表示可能 ---
 # Welcomeページの場合は名前入力フォームを表示
