@@ -616,16 +616,30 @@ if st.session_state.username:
                 }[st.session_state.test_mode['test_type']]
 
                 # JSONシリアライズ可能にするために、詳細結果をコピーして辞書に変換
-                # PandasのNaN値をNoneに変換することで、JSONシリアライズエラーを回避
                 serializable_details = []
                 for detail_item in st.session_state.test_mode['detailed_results']:
-                    serializable_item = {k: (None if pd.isna(v) else v) for k, v in detail_item.items()}
+                    # ここではPandas Timestampは発生しない想定だが、
+                    # もし万が一混入した場合に備え、None変換とDatetimeオブジェクトの変換を強化
+                    serializable_item = {}
+                    for k, v in detail_item.items():
+                        if pd.isna(v): # PandasのNaNはNoneに変換
+                            serializable_item[k] = None
+                        elif isinstance(v, (datetime, pd.Timestamp)): # datetimeオブジェクトやTimestampを文字列に変換
+                            serializable_item[k] = v.strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            serializable_item[k] = v
                     serializable_details.append(serializable_item)
 
-                test_details_str = json.dumps(serializable_details, ensure_ascii=False)
+                # json.dumps に default 引数を追加し、もしTimestamp型が残っていても変換するようにする
+                def json_serial(obj):
+                    if isinstance(obj, (datetime, pd.Timestamp)):
+                        return obj.strftime("%Y-%m-%d %H:%M:%S")
+                    raise TypeError ("Type %s not serializable" % type(obj))
+
+                test_details_str = json.dumps(serializable_details, ensure_ascii=False, default=json_serial)
 
                 new_result = pd.DataFrame([{
-                    'Date': test_date,
+                    'Date': test_date, # test_date は既に文字列形式
                     'Category': category_used,
                     'TestType': test_type_display,
                     'Score': final_score,
