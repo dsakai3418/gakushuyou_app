@@ -7,8 +7,11 @@ import random
 from datetime import datetime, date
 
 # --- 設定項目 ---
-GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyCILybwLG84jeJamJJxfrBc6p3rDA-EU5bSkx9MdE2RMWoz6GCJmPNgLjwabfUcT31jQ/exec" # ★★★ 自分のGAS_WEBAPP_URLに置き換える ★★★
-GAS_API_KEY = "my_streamlit_secret_key_123" # ★★★ 自分のGAS_API_KEYに置き換える ★★★
+# ★★★ 自分のGAS_WEBAPP_URLに置き換える ★★★
+# このURLはGASプロジェクトをデプロイした後に発行されます
+GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxatn34ETYuF6klnkxOC-GcVomR3TA6BcJ_Xj5No7XUxVSkC7YcPPQ3n4C55WkYamfa-Q/exec" 
+# ★★★ 自分のGAS_API_KEYに置き換える ★★★
+GAS_API_KEY = "my_streamlit_secret_key_123" 
 
 # ヘッダー定義
 VOCAB_HEADERS = ['ID', '用語 (Term)', '説明 (Definition)', '例文 (Example)', 'カテゴリ (Category)', '学習進捗 (Progress)']
@@ -25,17 +28,33 @@ if 'current_page' not in st.session_state:
     st.session_state.current_page = "Welcome" # 初期ページをWelcomeに設定
 
 # --- GAS APIとの連携関数 ---
-# カスタムJSONエンコーダー
+# カスタムJSONエンコーダー (GASに直接送信するJSONシリアライズ処理では不要になる可能性が高いが、残しておく)
 def json_serial_for_gas(obj):
     """datetime, date, Pandas TimestampオブジェクトをISOフォーマット文字列に変換するカスタムJSONシリアライザー"""
     if isinstance(obj, (datetime, pd.Timestamp, date)):
         return obj.isoformat()
-    # PandasのInt64の場合もPythonのintに変換
     if isinstance(obj, pd.Int64Dtype.type):
         return int(obj)
-    # Numpy booleanをPython booleanに変換
-    if isinstance(obj, (bool, pd.api.types.infer_dtype(obj) == 'boolean')): 
+    if isinstance(obj, bool): # Python bool
         return bool(obj)
+    # PandasのBooleanDtypeの型を直接チェック
+    if isinstance(obj, (pd.api.types.BooleanDtype().type)):
+        return bool(obj)
+    # SeriesやDataFrameが意図せず含まれた場合
+    if isinstance(obj, pd.Series):
+        return obj.to_dict()
+    if isinstance(obj, pd.DataFrame):
+        return obj.to_dict(orient='records')
+    # numpyの真偽値型
+    if hasattr(obj, 'dtype') and str(obj.dtype).startswith('bool'):
+        return bool(obj)
+    # NumPyの整数型
+    if hasattr(obj, 'dtype') and str(obj.dtype).startswith('int'):
+        return int(obj)
+    # NumPyの浮動小数点数型
+    if hasattr(obj, 'dtype') and str(obj.dtype).startswith('float'):
+        return float(obj)
+
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 @st.cache_data(ttl=60)
@@ -132,90 +151,30 @@ def load_data_from_gas(sheet_name):
         st.exception(e) # デバッグ用
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
 
+# === write_data_to_gas 関数を全面的に刷新 ===
 def write_data_to_gas(df, sheet_name, action='write_data'):
     try:
-        df_to_send = df.copy()
-
-        processed_data_rows = []
-        for index, row in df_to_send.iterrows():
-            processed_row = []
-            for col_name, item in row.items():
-                st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} - Original item: {item}, Type: {type(item)}")
-
-                # === ここから変更 ===
-                is_nan_val = False
-                if isinstance(item, (pd.Series, pd.DataFrame)):
-                    # itemがSeriesやDataFrameの場合、pd.isna()は真理値エラーを出すため、特殊処理
-                    # この状況は通常発生しないはずだが、発生しているため対応
-                    # ここでは、Series/DataFrame全体が「空」または「欠損」とみなせるか、あるいは内部にNaNがあるかを見る。
-                    # 今回のエラーは「真理値が曖昧」なので、ここでは値そのものがNaNであるかではなく、
-                    # そのオブジェクトがDataFrameの欠損セルとして扱えるかという視点に変更
-                    if item.empty: # SeriesやDataFrameが空である場合
-                        is_nan_val = True
-                    elif isinstance(item, pd.Series) and item.isnull().all(): # 全ての要素がNaNのSeries
-                        is_nan_val = True
-                    elif isinstance(item, pd.DataFrame) and item.isnull().all().all(): # 全ての要素がNaNのDataFrame
-                        is_nan_val = True
-                    # これでも捕捉できない場合は、itemが何らかの理由でpd.isna()に問題を起こす「値」を持つ
-                    # 最終手段として、そのオブジェクトがpd.NAのような値と「等しい」かをチェック
-                    elif item is pd.NA:
-                         is_nan_val = True
-                    # 上記で捕捉できない場合、Pandasのオブジェクトだが欠損値ではないと判断し、後続のJSON化処理へ
-                else:
-                    # 通常のScalar値の場合、pd.isna()でチェック
-                    is_nan_val = pd.isna(item)
-
-                if is_nan_val:
-                    processed_row.append(None)
-                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (is_nan_val) appended None.")
-                # === ここまで変更 ===
-
-                elif isinstance(item, (list, dict, pd.Series, pd.DataFrame)): # リスト、辞書、Series, DataFrameはJSON文字列に変換
-                    try:
-                        if isinstance(item, pd.Series):
-                            json_item = item.to_dict() 
-                        elif isinstance(item, pd.DataFrame): 
-                            json_item = item.to_dict(orient='records') 
-                        else: # Python list or dict
-                            json_item = item
-                        processed_row.append(json.dumps(json_item, ensure_ascii=False, default=json_serial_for_gas))
-                        st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (List/Dict/Series/DataFrame) converted to JSON: {processed_row[-1][:100]}...")
-                    except TypeError as e:
-                        st.error(f"JSONシリアライズエラー: {e} - 問題のデータ (カラム: {col_name}): {item}")
-                        processed_row.append(str(item)) 
-                        st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (List/Dict/Series/DataFrame) fallback to string: {processed_row[-1][:100]}...")
-                elif isinstance(item, (datetime, pd.Timestamp, date)):
-                    processed_row.append(item.isoformat())
-                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (DateTime) converted to ISO: {processed_row[-1]}")
-                elif isinstance(item, pd.Int64Dtype.type):
-                    processed_row.append(int(item))
-                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Int64) converted to int: {processed_row[-1]}")
-                elif isinstance(item, bool): 
-                    processed_row.append(item)
-                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Python Bool) as is: {processed_row[-1]}")
-                elif pd.api.types.is_bool_dtype(df_to_send[col_name]) and pd.notna(item): # Pandasのブール型カラムの非NaN値
-                    processed_row.append(bool(item))
-                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Pandas Bool) converted to bool: {processed_row[-1]}")
-                else:
-                    processed_row.append(item)
-                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Other Type) as is: {processed_row[-1]}")
-            processed_data_rows.append(processed_row)
-
-        # 後続の処理... (変更なし)
-        # ...
-
-        if action == 'append_row':
-            if len(processed_data_rows) != 1:
-                raise ValueError("append_row action expects exactly one row of data.")
-            data_to_send = processed_data_rows[0]
-            st.sidebar.write(f"DEBUG: Data to send (append): {data_to_send[:5]}...")
-        else:
-            data_to_send = [df_to_send.columns.tolist()] + processed_data_rows
-            st.sidebar.write(f"DEBUG: Data to send (write): Headers: {data_to_send[0][:5]}..., First row: {data_to_send[1][:5]}...")
+        # DataFrameをJSON文字列に変換
+        # date_format='iso' で日付をISO形式に、default=json_serial_for_gas でカスタムシリアライザーを適用
+        # force_ascii=False で日本語文字がエスケープされないようにする
+        df_json_str = df.to_json(orient='split', date_format='iso', default=json_serial_for_gas, force_ascii=False)
         
-        params = {'api_key': GAS_API_KEY, 'sheet': sheet_name, 'action': action}
+        # GASに送信するデータペイロードを構築
+        payload = {
+            'api_key': GAS_API_KEY,
+            'sheet': sheet_name,
+            'action': action,
+            'data': df_json_str # DataFrame全体をJSON文字列として送信
+        }
+        
+        st.sidebar.write(f"DEBUG: Data payload being sent to GAS (first 500 chars of data): {str(payload['data'])[:500]}...")
+        st.sidebar.write(f"DEBUG: Action: {action}, Sheet: {sheet_name}")
+
         headers = {'Content-Type': 'application/json'}
-        response = requests.post(GAS_WEBAPP_URL, params=params, headers=headers, json={'data': data_to_send})
+        # requests.post の jsonパラメータを使用すると、Pythonオブジェクトが自動的にJSONにシリアライズされる
+        # しかし、今回はdataキーにすでにJSON文字列を格納しているので、dataとして文字列を送信
+        # GAS側で data:JSON.parse(e.postData.contents).data を期待するため、payload全体をjsonとして送る
+        response = requests.post(GAS_WEBAPP_URL, headers=headers, json=payload)
         response.raise_for_status()
         result = response.json()
 
@@ -283,6 +242,7 @@ if st.session_state.username:
         st.json(st.session_state.to_dict()) # セッションステート全体を表示
         
         # DataFrameの概要を表示 (負荷軽減のため一部のみ)
+        # load_data_from_gasが実行された後にのみ表示
         if 'df_vocab' in locals() and not df_vocab.empty:
             st.write("df_vocab info:")
             st.dataframe(df_vocab.head(), use_container_width=True)
@@ -293,6 +253,7 @@ if st.session_state.username:
             st.dataframe(df_test_results.head(), use_container_width=True)
             st.write(f"df_test_results columns: {df_test_results.columns.tolist()}")
             st.write(f"df_test_results dtypes: {df_test_results.dtypes.to_dict()}")
+
 
     sanitized_username = "".join(filter(str.isalnum, st.session_state.username))
     current_worksheet_name = f"Sheet_{sanitized_username}"
@@ -475,30 +436,29 @@ if st.session_state.username:
             'example_to_term': '例文→用語'
         }[st.session_state.test_mode['test_type']]
 
-        new_result_df_for_gas = pd.DataFrame([{
+        # df_test_resultsがまだ空の場合はヘッダーを先に作成
+        if df_test_results.empty:
+            df_test_results = pd.DataFrame(columns=TEST_RESULTS_HEADERS)
+
+        # 新しい結果を行として追加
+        new_result_row_data = {
             'Date': test_date_obj,
             'Category': category_used,
             'TestType': test_type_display,
             'Score': final_score,
             'TotalQuestions': len(questions),
             'Details': current_detailed_results
-        }])
-        
-        # DEBUG: テスト結果 DataFrame の内容を確認
-        st.sidebar.write("DEBUG: New test result DataFrame before sending to GAS:")
-        st.sidebar.dataframe(new_result_df_for_gas.head(), use_container_width=True)
-        st.sidebar.write(f"DEBUG: New test result DataFrame columns: {new_result_df_for_gas.columns.tolist()}")
-        st.sidebar.write(f"DEBUG: New test result DataFrame dtypes: {new_result_df_for_gas.dtypes.to_dict()}")
+        }
+        # pandas.concatの代わりに_appendを使用 (将来のバージョンでのwarning回避のため)
+        df_test_results = df_test_results._append(new_result_row_data, ignore_index=True)
 
-        write_success_results = write_data_to_gas(new_result_df_for_gas, test_results_sheet_name, action='append_row')
+        # write_data_to_gasにDataFrame全体を渡す
+        write_success_results = write_data_to_gas(df_test_results, test_results_sheet_name)
 
         if write_success_results:
-            if df_test_results.empty:
-                df_test_results = pd.DataFrame(columns=TEST_RESULTS_HEADERS)
-            # append_rowアクションで成功した場合、df_test_resultsを再ロードする必要がある
-            # ここでは便宜的にconcatしているが、load_data_from_gasを再度呼び出すのが安全
-            df_test_results = load_data_from_gas(test_results_sheet_name) 
             st.success("テスト結果が保存されました！「データ管理」から確認できます。")
+            # 保存成功後、df_test_resultsを再ロードして最新の状態にする
+            df_test_results = load_data_from_gas(test_results_sheet_name)
         else:
             st.error("テスト結果の保存に失敗しました。")
 
@@ -581,15 +541,16 @@ if st.session_state.username:
             if submitted:
                 if new_term and new_definition and category_to_add:
                     new_id = 1 if df_vocab.empty else df_vocab['ID'].max() + 1
-                    new_row = pd.DataFrame([{
+                    new_row_data = {
                         'ID': new_id,
                         '用語 (Term)': new_term,
                         '説明 (Definition)': new_definition,
                         '例文 (Example)': new_example,
                         'カテゴリ (Category)': category_to_add,
                         '学習進捗 (Progress)': 'Not Started'
-                    }])
-                    df_vocab = pd.concat([df_vocab, new_row], ignore_index=True)
+                    }
+                    # pandas.concatの代わりに_appendを使用
+                    df_vocab = df_vocab._append(new_row_data, ignore_index=True)
                     if write_data_to_gas(df_vocab, current_worksheet_name):
                         st.success(f"用語 '{new_term}' が追加されました！")
                         st.rerun()
@@ -919,6 +880,61 @@ if st.session_state.username:
     
     elif st.session_state.current_page == "データ管理":
         st.header("データ管理")
+
+        # --- CSVエクスポート/インポート機能 ---
+        st.subheader("CSVデータの管理")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                label="用語データをCSVでダウンロード",
+                data=df_vocab.to_csv(index=False).encode('utf-8'),
+                file_name=f"{sanitized_username}_vocab_data.csv",
+                mime="text/csv",
+                help="現在の用語一覧をCSVファイルとしてダウンロードします。"
+            )
+        with col2:
+            uploaded_file = st.file_uploader("用語データをCSVでアップロード", type=["csv"], help="CSVファイルをアップロードして、用語一覧を更新します。")
+            if uploaded_file is not None:
+                try:
+                    uploaded_df = pd.read_csv(uploaded_file)
+                    # ヘッダーをVOCAB_HEADERSに合わせる処理
+                    if not all(col in uploaded_df.columns for col in VOCAB_HEADERS):
+                        st.warning("アップロードされたCSVのヘッダーが期待される形式と異なります。既存のデータと結合できない可能性があります。")
+                        # 必要なカラムを補完し、余分なカラムを削除
+                        for col in VOCAB_HEADERS:
+                            if col not in uploaded_df.columns:
+                                uploaded_df[col] = pd.NA
+                        uploaded_df = uploaded_df[VOCAB_HEADERS]
+
+                    # IDを自動採番し直すか、既存を尊重するかは要件次第
+                    # ここでは既存のIDを尊重しつつ、重複を排除し、新しい用語には新しいIDを割り当てる方針
+                    
+                    # 既存のdf_vocabとuploaded_dfを結合する
+                    # 既存のデータとアップロードされたデータで'用語 (Term)'と'説明 (Definition)'が重複する場合は、アップロードされたデータを優先
+                    df_combined = pd.concat([df_vocab.drop_duplicates(subset=['用語 (Term)', '説明 (Definition)']), 
+                                             uploaded_df.drop_duplicates(subset=['用語 (Term)', '説明 (Definition)'])], 
+                                            ignore_index=True)
+                    
+                    df_combined['ID'] = pd.to_numeric(df_combined['ID'], errors='coerce').fillna(0).astype('Int64')
+
+                    # IDの採番を整理
+                    # 既存IDを維持しつつ、新しく追加されたものに最大のID+1から採番
+                    # ただし、同じ用語・説明が複数あった場合、IDが重複することがあるので、一旦全て振り直すのが安全
+                    df_combined = df_combined.sort_values(by='ID').reset_index(drop=True)
+                    df_combined['ID'] = range(1, len(df_combined) + 1) # 全て振り直し
+                    
+                    df_vocab = df_combined # 新しいdf_vocabで上書き
+                    
+                    if write_data_to_gas(df_vocab, current_worksheet_name):
+                        st.success("CSVファイルから用語データが正常にアップロードされ、更新されました！")
+                        st.rerun()
+                    else:
+                        st.error("CSVデータのGASへの書き込みに失敗しました。")
+                except Exception as e:
+                    st.error(f"CSVファイルの読み込みまたは処理中にエラーが発生しました: {e}")
+                    st.exception(e) # デバッグ用
+        
+        st.markdown("---")
 
         if df_test_results.empty:
             st.info("まだテスト結果が保存されていません。")
