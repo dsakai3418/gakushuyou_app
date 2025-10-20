@@ -7,7 +7,7 @@ import random
 from datetime import datetime, date
 
 # --- 設定項目 ---
-GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzIHdzrPWRgu3uyOb2A1rHQTvpxzU6sLKBm5Ybwt--ozxLFe0_i7nr071RjwjgdkaxGA/exec"
+GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzk47d1-GlVfMr_js5tSl2EflcNmj_GV4-cRaPLu4CSto6Mm4kwcVJntowa1gDZIEF2lg/exec"
 GAS_API_KEY = "my_streamlit_secret_key_123"
 
 # ヘッダー定義
@@ -895,4 +895,5 @@ if st.session_state.username:
                 )
 
         else:
+
             st.info("過去のテスト結果はまだありません。テストモードでテストを実施してください。")
