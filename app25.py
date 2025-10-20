@@ -142,27 +142,47 @@ def write_data_to_gas(df, sheet_name, action='write_data'):
             for col_name, item in row.items():
                 st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} - Original item: {item}, Type: {type(item)}")
 
-                if pd.isna(item): # ここでエラーが出ている
+                # === ここから変更 ===
+                is_nan_val = False
+                if isinstance(item, (pd.Series, pd.DataFrame)):
+                    # itemがSeriesやDataFrameの場合、pd.isna()は真理値エラーを出すため、特殊処理
+                    # この状況は通常発生しないはずだが、発生しているため対応
+                    # ここでは、Series/DataFrame全体が「空」または「欠損」とみなせるか、あるいは内部にNaNがあるかを見る。
+                    # 今回のエラーは「真理値が曖昧」なので、ここでは値そのものがNaNであるかではなく、
+                    # そのオブジェクトがDataFrameの欠損セルとして扱えるかという視点に変更
+                    if item.empty: # SeriesやDataFrameが空である場合
+                        is_nan_val = True
+                    elif isinstance(item, pd.Series) and item.isnull().all(): # 全ての要素がNaNのSeries
+                        is_nan_val = True
+                    elif isinstance(item, pd.DataFrame) and item.isnull().all().all(): # 全ての要素がNaNのDataFrame
+                        is_nan_val = True
+                    # これでも捕捉できない場合は、itemが何らかの理由でpd.isna()に問題を起こす「値」を持つ
+                    # 最終手段として、そのオブジェクトがpd.NAのような値と「等しい」かをチェック
+                    elif item is pd.NA:
+                         is_nan_val = True
+                    # 上記で捕捉できない場合、Pandasのオブジェクトだが欠損値ではないと判断し、後続のJSON化処理へ
+                else:
+                    # 通常のScalar値の場合、pd.isna()でチェック
+                    is_nan_val = pd.isna(item)
+
+                if is_nan_val:
                     processed_row.append(None)
-                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (isna) appended None.")
-                elif isinstance(item, (list, dict, pd.Series, pd.DataFrame)): # リスト、辞書、Series, DataFrameは最優先でJSON文字列に変換
+                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (is_nan_val) appended None.")
+                # === ここまで変更 ===
+
+                elif isinstance(item, (list, dict, pd.Series, pd.DataFrame)): # リスト、辞書、Series, DataFrameはJSON文字列に変換
                     try:
-                        # Pandas Series/DataFrameの場合、内部の値を考慮してJSON化するか、そのまま文字列化
-                        if isinstance(item, pd.Series) or isinstance(item, pd.DataFrame):
-                            # Series/DataFrameの場合、値をJSONとして表現するのが最も適切
-                            # to_json()を使うと、Seriesの場合は値のリスト、DataFrameの場合はオブジェクトのリストとして出力される
-                            # ただし、GASで適切に処理されるように、dict形式に変換してからjson.dumpsするのが安全
-                            if isinstance(item, pd.Series):
-                                json_item = item.to_dict() # Seriesを辞書に変換
-                            else: # pd.DataFrame
-                                json_item = item.to_dict(orient='records') # DataFrameを辞書のリストに変換
-                            processed_row.append(json.dumps(json_item, ensure_ascii=False, default=json_serial_for_gas))
+                        if isinstance(item, pd.Series):
+                            json_item = item.to_dict() 
+                        elif isinstance(item, pd.DataFrame): 
+                            json_item = item.to_dict(orient='records') 
                         else: # Python list or dict
-                            processed_row.append(json.dumps(item, ensure_ascii=False, default=json_serial_for_gas))
+                            json_item = item
+                        processed_row.append(json.dumps(json_item, ensure_ascii=False, default=json_serial_for_gas))
                         st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (List/Dict/Series/DataFrame) converted to JSON: {processed_row[-1][:100]}...")
                     except TypeError as e:
                         st.error(f"JSONシリアライズエラー: {e} - 問題のデータ (カラム: {col_name}): {item}")
-                        processed_row.append(str(item)) # fallback to string
+                        processed_row.append(str(item)) 
                         st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (List/Dict/Series/DataFrame) fallback to string: {processed_row[-1][:100]}...")
                 elif isinstance(item, (datetime, pd.Timestamp, date)):
                     processed_row.append(item.isoformat())
@@ -170,11 +190,10 @@ def write_data_to_gas(df, sheet_name, action='write_data'):
                 elif isinstance(item, pd.Int64Dtype.type):
                     processed_row.append(int(item))
                     st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Int64) converted to int: {processed_row[-1]}")
-                elif isinstance(item, bool): # Pythonのbool型
+                elif isinstance(item, bool): 
                     processed_row.append(item)
                     st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Python Bool) as is: {processed_row[-1]}")
                 elif pd.api.types.is_bool_dtype(df_to_send[col_name]) and pd.notna(item): # Pandasのブール型カラムの非NaN値
-                    # ここでitemが複数要素を持つ配列である可能性は低いが、念のため
                     processed_row.append(bool(item))
                     st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Pandas Bool) converted to bool: {processed_row[-1]}")
                 else:
