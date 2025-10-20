@@ -7,7 +7,7 @@ import random
 from datetime import datetime, date
 
 # --- 設定項目 ---
-GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzIHJdzrPWRgu3uyOb2A1rHQTvpxzU6sLKBm5Ybwt--ozxLFe0_i7nr071RjwjgdkaxGA/exec"
+GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzIHdzrPWRgu3uyOb2A1rHQTvpxzU6sLKBm5Ybwt--ozxLFe0_i7nr071RjwjgdkaxGA/exec"
 GAS_API_KEY = "my_streamlit_secret_key_123"
 
 # ヘッダー定義
@@ -851,4 +851,48 @@ if st.session_state.username:
         if not df_test_results.empty:
             df_test_results_display = df_test_results.copy()
             
-            df_test_results_display['
+            df_test_results_display['Date_Display'] = df_test_results_display['Date'].dt.strftime("%Y-%m-%d %H:%M:%S")
+            
+            for idx, row in df_test_results_display.iterrows():
+                with st.expander(f"テスト日時: {row['Date_Display']} | カテゴリ: {row['Category']} | 形式: {row['TestType']} | スコア: {row['Score']} / {row['TotalQuestions']}"):
+                    st.write(f"---")
+                    st.write(f"**テスト詳細:**")
+                    
+                    details = row['Details'] if isinstance(row['Details'], list) else []
+
+                    if not details:
+                        st.info("このテストには詳細な結果が記録されていません。")
+                    else:
+                        for i, detail in enumerate(details):
+                            is_correct_icon = "✅" if detail.get('is_correct') else "❌" 
+                            st.write(f"**問題 {i+1}** {is_correct_icon}")
+                            st.write(f"　- 問題文: {detail.get('question_text', 'N/A')}")
+                            st.write(f"　- 正解: {detail.get('correct_answer', 'N/A')}")
+                            st.write(f"　- あなたの回答: {detail.get('user_answer', 'N/A')}")
+                            st.write("---辞書情報---") 
+                            st.write(f"　- 用語: {detail.get('term_name', 'N/A')}")
+                            st.write(f"　- 説明: {detail.get('term_definition', 'N/A')}")
+                            example = detail.get('term_example', 'N/A')
+                            if example != 'N/A' and example != '':
+                                st.write(f"　- 例文: {example}")
+                            st.markdown("---")
+            
+            st.markdown("---")
+            if st.button("CSVでダウンロード (テスト結果)"):
+                df_test_results_download = df_test_results.copy()
+                df_test_results_download['Details'] = df_test_results_download['Details'].apply(
+                    lambda x: json.dumps(x, ensure_ascii=False, default=json_serial_for_gas) if isinstance(x, list) else '[]'
+                )
+                df_test_results_download['Date'] = df_test_results_download['Date'].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+                csv_test_results = df_test_results_download.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="テスト結果をダウンロード",
+                    data=csv_test_results,
+                    file_name=f"{sanitized_username}_test_results_{datetime.now().strftime('%Y%m%d%H%M%S')}.csv",
+                    mime="text/csv",
+                    key="download_test_results_csv"
+                )
+
+        else:
+            st.info("過去のテスト結果はまだありません。テストモードでテストを実施してください。")
