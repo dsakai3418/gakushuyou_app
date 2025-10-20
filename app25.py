@@ -7,8 +7,14 @@ import io
 import time
 
 # --- 設定 ---
-GAS_URL = st.secrets["gas"]["url"]
-GAS_API_KEY = st.secrets["gas"]["api_key"]
+# ここにGASのデプロイ済みURLを設定します。
+# 質問で提供いただいたURLを以下に設定します。
+GAS_URL = "https://script.google.com/macros/s/AKfycbxPlj6zw7v-S-Fg6tYu_cdQP3hoT1tXk_tncYbclJApHoT6XRlmok13U_4uwK1gIM3-8A/exec"
+# StreamlitのSecrets管理にAPIキーを保存している場合
+GAS_API_KEY = st.secrets["gas"]["api_key"] 
+# secretsにAPIキーがない場合は、直接ここに記述（推奨はしません）
+# GAS_API_KEY = "my_streamlit_secret_key_123"
+
 CURRENT_WORKSHEET_NAME = "Sheet_miso" # 通常の語彙シート名
 TEST_RESULTS_SHEET_PREFIX = "Sheet_TestResults_" # テスト結果シート名のプレフィックス
 
@@ -269,7 +275,10 @@ if st.session_state.current_page == "データ管理":
 elif st.session_state.current_page == "テストモード":
     st.header("テストモード")
 
+    # ここでtest_results_sheet_nameとcurrent_worksheet_nameを定義
     test_results_sheet_name = TEST_RESULTS_SHEET_PREFIX + st.session_state.current_worksheet_name.replace("Sheet_", "")
+    current_worksheet_name_for_func = st.session_state.current_worksheet_name
+
 
     if st.session_state.df_vocab.empty:
         st.warning("用語集にデータがありません。データ管理ページから用語を追加してください。", icon="⚠️")
@@ -411,9 +420,8 @@ elif st.session_state.current_page == "テストモード":
                 st.subheader("テスト結果")
 
                 # --- テスト結果と学習進捗をGASに書き込む関数 ---
-                def save_test_results_and_progress():
-                    nonlocal current_worksheet_name, test_results_sheet_name # nonlocalキーワードを追加
-
+                # 引数として必要なシート名を渡すように変更
+                def save_test_results_and_progress_inner(current_vocab_sheet_name, current_test_results_sheet_name):
                     questions_in_session = st.session_state.test_mode['questions']
                     user_answers_in_session = st.session_state.test_mode['answers']
                     
@@ -497,7 +505,7 @@ elif st.session_state.current_page == "テストモード":
                         df_test_results_to_save = pd.concat([st.session_state.df_test_results, pd.DataFrame([new_result_df_row], columns=TEST_RESULTS_HEADERS)], ignore_index=True)
 
                     # テスト結果を保存
-                    write_success_results = write_data_to_gas(df_test_results_to_save, test_results_sheet_name)
+                    write_success_results = write_data_to_gas(df_test_results_to_save, current_test_results_sheet_name)
                     if write_success_results:
                         st.session_state.df_test_results = df_test_results_to_save # セッション状態を更新
                         st.success("テスト結果が保存されました！「データ管理」から確認できます。")
@@ -508,7 +516,7 @@ elif st.session_state.current_page == "テストモード":
                     if updated_vocab_ids:
                         # テンポラリDataFrameからst.session_state.df_vocabを更新
                         st.session_state.df_vocab = temp_df_vocab 
-                        write_success_vocab = write_data_to_gas(st.session_state.df_vocab, current_worksheet_name)
+                        write_success_vocab = write_data_to_gas(st.session_state.df_vocab, current_vocab_sheet_name)
                         if write_success_vocab:
                             st.success("学習進捗が更新されました！")
                         else:
@@ -518,7 +526,8 @@ elif st.session_state.current_page == "テストモード":
 
                 # 実行と結果表示
                 if "test_results_saved" not in st.session_state.test_mode or not st.session_state.test_mode["test_results_saved"]:
-                    save_test_results_and_progress()
+                    # save_test_results_and_progress_innerを呼び出す際に引数を渡す
+                    save_test_results_and_progress_inner(current_worksheet_name_for_func, test_results_sheet_name)
                     st.session_state.test_mode["test_results_saved"] = True
                 
                 st.write(f"お疲れ様でした！ あなたの最終スコアは {st.session_state.test_mode['score']} / {len(questions)} です。")
