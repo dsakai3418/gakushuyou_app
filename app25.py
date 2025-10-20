@@ -11,9 +11,9 @@ import time
 # 質問で提供いただいたURLを以下に設定します。
 GAS_URL = "https://script.google.com/macros/s/AKfycbxPlj6zw7v-S-Fg6tYu_cdQP3hoT1tXk_tncYbclJApHoT6XRlmok13U_4uwK1gIM3-8A/exec"
 # StreamlitのSecrets管理にAPIキーを保存している場合
-GAS_API_KEY = st.secrets["gas"]["api_key"] 
+# GAS_API_KEY = st.secrets["gas"]["api_key"] # この行をコメントアウト
 # secretsにAPIキーがない場合は、直接ここに記述（推奨はしません）
-# GAS_API_KEY = "my_streamlit_secret_key_123"
+GAS_API_KEY = "my_streamlit_secret_key_123" # ここに直接あなたのAPIキーを記述
 
 CURRENT_WORKSHEET_NAME = "Sheet_miso" # 通常の語彙シート名
 TEST_RESULTS_SHEET_PREFIX = "Sheet_TestResults_" # テスト結果シート名のプレフィックス
