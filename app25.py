@@ -27,6 +27,9 @@ def json_serial_for_gas(obj):
     """datetime, date, Pandas TimestampオブジェクトをISOフォーマット文字列に変換するカスタムJSONシリアライザー"""
     if isinstance(obj, (datetime, pd.Timestamp, date)):
         return obj.isoformat()
+    # PandasのInt64の場合もPythonのintに変換
+    if isinstance(obj, pd.Int64Dtype.type):
+        return int(obj)
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 @st.cache_data(ttl=60)
@@ -47,7 +50,6 @@ def load_data_from_gas(sheet_name):
                     return pd.DataFrame(columns=VOCAB_HEADERS)
             else:
                 st.error(f"GASからエラーが返されました: {data['error']}")
-                # st.stop() # ここで停止せず、エラーメッセージを表示して続行
                 return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
         
         if 'data' not in data or not data['data']:
@@ -57,7 +59,8 @@ def load_data_from_gas(sheet_name):
                 return pd.DataFrame(columns=VOCAB_HEADERS)
 
         gas_values = data['data']
-        # GASからのレスポンス形式が [['Header1', 'Header2'], ['Value1', 'Value2']...] のため調整
+        
+        # ヘッダーとデータを分離
         if not gas_values:
              if sheet_name.startswith("Sheet_TestResults_"):
                  return pd.DataFrame(columns=TEST_RESULTS_HEADERS)
@@ -68,7 +71,7 @@ def load_data_from_gas(sheet_name):
         rows = gas_values[1:]
         df = pd.DataFrame(rows, columns=header)
 
-        if not sheet_name.startswith("Sheet_TestResults_"):
+        if not sheet_name.startswith("Sheet_TestResults_"): # 通常の用語シートの場合
             for col in VOCAB_HEADERS:
                 if col not in df.columns:
                     df[col] = pd.NA
@@ -110,35 +113,26 @@ def load_data_from_gas(sheet_name):
     except requests.exceptions.HTTPError as e:
         st.error(f"GAS Webアプリへの接続に失敗しました: {e}")
         st.info(f"GAS WebアプリのURL: {GAS_WEBAPP_URL} が正しいか、デプロイされているか、またはGAS側のスクリプトにエラーがないか確認してください。")
-        # st.stop() # ここで停止せず、エラーメッセージを表示して続行
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
     except requests.exceptions.RequestException as e:
         st.error(f"GAS Webアプリへの接続に失敗しました: {e}")
         st.info(f"GAS WebアプリのURL: {GAS_WEBAPP_URL} が正しいか、デプロイされているか確認してください。")
-        # st.stop() # ここで停止せず、エラーメッセージを表示して続行
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
     except json.JSONDecodeError as e:
         st.error(f"GASからのレスポンスをJSONとして解析できませんでした。エラー: {e}。レスポンス内容: {response.text}。GASのコードを確認してください。")
-        # st.stop() # ここで停止せず、エラーメッセージを表示して続行
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
     except Exception as e:
         st.error(f"データの読み込み中に予期せぬエラーが発生しました: {e}")
-        # st.stop() # ここで停止せず、エラーメッセージを表示して続行
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
 
 def write_data_to_gas(df, sheet_name, action='write_data'): # action引数を追加し、デフォルトを'write_data'とする
     try:
         df_to_send = df.copy()
 
-        # IDカラムが存在し、数値型の場合はInt64に変換（GASへ送る際はPythonのint型にするため）
-        if 'ID' in df_to_send.columns:
-            df_to_send['ID'] = pd.to_numeric(df_to_send['ID'], errors='coerce').fillna(0).astype('Int64')
-        
-        # 各カラムをGASが扱いやすい形式に変換
         processed_data_rows = []
         for _, row in df_to_send.iterrows():
             processed_row = []
-            for col_name, item in row.items():
+            for col_name, item in row.items(): # col_nameも取得して型チェックに利用
                 # NaNやNoneをNoneに変換
                 if pd.isna(item):
                     processed_row.append(None)
@@ -152,8 +146,8 @@ def write_data_to_gas(df, sheet_name, action='write_data'): # action引数を追
                     except TypeError as e:
                         st.error(f"JSONシリアライズエラー: {e} - 問題のデータ: {item}")
                         processed_row.append(str(item)) # シリアライズできない場合は文字列として送る
-                # Int64型をPythonのintに変換
-                elif pd.api.types.is_integer_dtype(row[col_name]) and pd.notna(item):
+                # Pandasの整数型（Int64など）をPythonのintに変換
+                elif pd.api.types.is_integer_dtype(df_to_send[col_name]) and pd.notna(item):
                     processed_row.append(int(item))
                 # その他の型はそのまま
                 else:
@@ -179,8 +173,7 @@ def write_data_to_gas(df, sheet_name, action='write_data'): # action引数を追
             st.error(f"GAS書き込み中にエラーが返されました: {result['error']}")
             return False
         
-        # st.success(f"データがスプレッドシート '{sheet_name}' に保存されました！") # 呼び出し元でメッセージを表示
-        st.cache_data.clear()
+        st.cache_data.clear() # キャッシュをクリア
         return True
     except requests.exceptions.RequestException as e:
         st.error(f"GAS Webアプリへの書き込み接続に失敗しました: {e}")
@@ -326,96 +319,94 @@ if st.session_state.username:
         st.rerun()
 
     # --- テスト結果と学習進捗をGASに書き込む関数 ---
-def save_test_results_and_progress():
-    global df_vocab, df_test_results # グローバル変数としてdf_vocabとdf_test_resultsを更新
+    def save_test_results_and_progress():
+        global df_vocab, df_test_results # グローバル変数としてdf_vocabとdf_test_resultsを更新
 
-    questions = st.session_state.test_mode['questions']
-    user_answers = st.session_state.test_mode['answers']
-    
-    final_score = 0
-    current_detailed_results = []
-    updated_vocab_ids = set() # 今回のテストで進捗が更新されたIDを追跡
-
-    for i, q in enumerate(questions):
-        user_ans = user_answers[i]
-        is_correct = (user_ans == q['correct_answer'])
-        if is_correct:
-            final_score += 1
+        questions = st.session_state.test_mode['questions']
+        user_answers = st.session_state.test_mode['answers']
         
-        current_detailed_results.append({
-            'question_text': q['question_text'],
-            'correct_answer': q['correct_answer'],
-            'user_answer': user_ans if user_ans is not None else "未回答",
-            'is_correct': is_correct,
-            'term_id': q.get('term_id'),
-            'term_name': q.get('term_name', 'N/A'), 
-            'term_definition': q.get('term_definition', 'N/A'), 
-            'term_example': q.get('term_example', 'N/A') 
-        })
+        final_score = 0
+        current_detailed_results = []
+        updated_vocab_ids = set() # 今回のテストで進捗が更新されたIDを追跡
 
-        # 学習進捗の更新ロジック (df_vocabを直接更新)
-        original_df_index = df_vocab[df_vocab['ID'] == q['term_id']].index
-        if not original_df_index.empty:
-            row_idx = original_df_index[0]
-            current_progress = df_vocab.loc[row_idx, '学習進捗 (Progress)']
-            
+        for i, q in enumerate(questions):
+            user_ans = user_answers[i]
+            is_correct = (user_ans == q['correct_answer'])
             if is_correct:
-                if current_progress == 'Not Started':
-                    df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Learning'
-                elif current_progress == 'Learning':
-                    df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Mastered'
-            else: # 不正解の場合、進捗を戻す
-                if current_progress == 'Mastered':
-                    df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Learning'
-                elif current_progress == 'Learning':
-                    df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Not Started'
-            updated_vocab_ids.add(q['term_id'])
+                final_score += 1
+            
+            current_detailed_results.append({
+                'question_text': q['question_text'],
+                'correct_answer': q['correct_answer'],
+                'user_answer': user_ans if user_ans is not None else "未回答",
+                'is_correct': is_correct,
+                'term_id': q.get('term_id'),
+                'term_name': q.get('term_name', 'N/A'), 
+                'term_definition': q.get('term_definition', 'N/A'), 
+                'term_example': q.get('term_example', 'N/A') 
+            })
 
-    st.session_state.test_mode['score'] = final_score
-    st.session_state.test_mode['detailed_results'] = current_detailed_results
-    
-    test_date_obj = datetime.now()
-    category_used = st.session_state.test_mode['selected_category']
-    if st.session_state.test_mode['question_source'] == 'all_random':
-        category_used = '全カテゴリ'
-    
-    test_type_display = {
-        'term_to_def': '用語→説明',
-        'example_to_term': '例文→用語'
-    }[st.session_state.test_mode['test_type']]
+            # 学習進捗の更新ロジック (df_vocabを直接更新)
+            original_df_index = df_vocab[df_vocab['ID'] == q['term_id']].index
+            if not original_df_index.empty:
+                row_idx = original_df_index[0]
+                current_progress = df_vocab.loc[row_idx, '学習進捗 (Progress)']
+                
+                if is_correct:
+                    if current_progress == 'Not Started':
+                        df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Learning'
+                    elif current_progress == 'Learning':
+                        df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Mastered'
+                else: # 不正解の場合、進捗を戻す
+                    if current_progress == 'Mastered':
+                        df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Learning'
+                    elif current_progress == 'Learning':
+                        df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Not Started'
+                updated_vocab_ids.add(q['term_id'])
 
-    # ★★★ ここから修正 ★★★
-    # 新しいテスト結果1行分のDataFrameを作成
-    new_result_df_for_gas = pd.DataFrame([{
-        'Date': test_date_obj,
-        'Category': category_used,
-        'TestType': test_type_display,
-        'Score': final_score,
-        'TotalQuestions': len(questions),
-        'Details': current_detailed_results
-    }])
-    
-    # GASへは1行のデータとして追記アクションで送信
-    write_success_results = write_data_to_gas(new_result_df_for_gas, test_results_sheet_name, action='append_row')
-    # ★★★ ここまで修正 ★★★
+        st.session_state.test_mode['score'] = final_score
+        st.session_state.test_mode['detailed_results'] = current_detailed_results
+        
+        test_date_obj = datetime.now()
+        category_used = st.session_state.test_mode['selected_category']
+        if st.session_state.test_mode['question_source'] == 'all_random':
+            category_used = '全カテゴリ'
+        
+        test_type_display = {
+            'term_to_def': '用語→説明',
+            'example_to_term': '例文→用語'
+        }[st.session_state.test_mode['test_type']]
 
-    if write_success_results:
-        # Streamlitセッション内のdf_test_resultsにも追加
-        if df_test_results.empty:
-            df_test_results = pd.DataFrame(columns=TEST_RESULTS_HEADERS)
-        df_test_results = pd.concat([df_test_results, new_result_df_for_gas], ignore_index=True)
-        st.success("テスト結果が保存されました！「データ管理」から確認できます。")
-        st.cache_data.clear() # キャッシュをクリアして次回ロード時に最新データを取得
-    else:
-        st.error("テスト結果の保存に失敗しました。")
+        # 新しいテスト結果1行分のDataFrameを作成
+        new_result_df_for_gas = pd.DataFrame([{
+            'Date': test_date_obj,
+            'Category': category_used,
+            'TestType': test_type_display,
+            'Score': final_score,
+            'TotalQuestions': len(questions),
+            'Details': current_detailed_results
+        }])
+        
+        # GASへは1行のデータとして追記アクションで送信
+        write_success_results = write_data_to_gas(new_result_df_for_gas, test_results_sheet_name, action='append_row')
 
-    # 学習進捗を保存 (これはこれまで通りdf_vocab全体を上書きで送る)
-    if updated_vocab_ids:
-        write_success_vocab = write_data_to_gas(df_vocab, current_worksheet_name) # action引数を指定しない場合はデフォルトのwrite_dataになる
-        if write_success_vocab:
-            st.success("学習進捗が更新されました！")
+        if write_success_results:
+            # Streamlitセッション内のdf_test_resultsにも追加
+            if df_test_results.empty:
+                df_test_results = pd.DataFrame(columns=TEST_RESULTS_HEADERS)
+            df_test_results = pd.concat([df_test_results, new_result_df_for_gas], ignore_index=True)
+            st.success("テスト結果が保存されました！「データ管理」から確認できます。")
+            # st.cache_data.clear() # write_data_to_gas内でclearされるため不要
         else:
-            st.error("学習進捗の更新に失敗しました。")
+            st.error("テスト結果の保存に失敗しました。")
+
+        # 学習進捗を保存 (これはこれまで通りdf_vocab全体を上書きで送る)
+        if updated_vocab_ids:
+            write_success_vocab = write_data_to_gas(df_vocab, current_worksheet_name) # action引数を指定しない場合はデフォルトのwrite_dataになる
+            if write_success_vocab:
+                st.success("学習進捗が更新されました！")
+            else:
+                st.error("学習進捗の更新に失敗しました。")
 
 
     # --- ナビゲーション ---
@@ -423,11 +414,11 @@ def save_test_results_and_progress():
     
     # デフォルトの選択を「用語の追加・編集」に変更
     default_sidebar_options = [
+        "用語の追加・編集", 
         "学習モード",
         "テストモード",
         "辞書モード",
         "用語一覧", 
-        "用語の追加・編集",
         "データ管理"
     ]
     page = st.sidebar.radio("Go to", default_sidebar_options, index=0) # index=0 でデフォルトを「用語の追加・編集」に設定
@@ -698,7 +689,6 @@ def save_test_results_and_progress():
                     st.warning("中断中のテストがあります。")
                     if st.button("テストを再開", key="resume_test_button"):
                         resume_test()
-                        # st.stop() # rerun()で十分
                         st.rerun()
 
                 st.subheader("新しいテストを開始")
@@ -865,19 +855,26 @@ def save_test_results_and_progress():
                         if st.button("この結果を削除", key=f"delete_result_{i}"):
                             # 削除確認メッセージを出す前に、本当に削除するかをユーザーに確認する
                             st.warning("本当にこのテスト結果を削除しますか？")
-                            if st.button("はい、削除します", key=f"confirm_delete_result_{i}"):
-                                df_test_results = df_test_results.drop(index=i).reset_index(drop=True)
-                                if write_data_to_gas(df_test_results, test_results_sheet_name):
-                                    st.success("テスト結果が削除されました。")
-                                    st.session_state.expanded_test_result_index = None
-                                    st.rerun()
-                                else:
-                                    st.error("テスト結果の削除に失敗しました。")
-                            else: # 「はい、削除します」が押されなかった場合
-                                st.info("削除をキャンセルしました。")
+                            # 削除確認用のフォーム
+                            with st.form(key=f"confirm_delete_form_{i}"):
+                                confirm_delete = st.form_submit_button("はい、削除します")
+                                cancel_delete = st.form_submit_button("キャンセル")
+
+                                if confirm_delete:
+                                    df_test_results = df_test_results.drop(index=i).reset_index(drop=True)
+                                    # df_test_results全体をGASに書き戻す (上書き)
+                                    if write_data_to_gas(df_test_results, test_results_sheet_name):
+                                        st.success("テスト結果が削除されました。")
+                                        st.session_state.expanded_test_result_index = None
+                                        st.rerun()
+                                    else:
+                                        st.error("テスト結果の削除に失敗しました。")
+                                elif cancel_delete:
+                                    st.info("削除をキャンセルしました。")
+                                    st.rerun() # キャンセル時に再描画して確認フォームを閉じる
                 
                 # 詳細を見る/閉じるボタンをexpanderの外で制御する
-                if not is_expanded:
+                if not is_expanded and f"confirm_delete_form_{i}" not in st.session_state: # 削除確認フォームが表示されていない場合のみ
                     if st.button("詳細を見る", key=f"open_result_{i}"):
                         st.session_state.expanded_test_result_index = i
                         st.rerun()
