@@ -18,6 +18,7 @@ TEST_RESULTS_HEADERS = ['Date', 'Category', 'TestType', 'Score', 'TotalQuestions
 st.set_page_config(layout="wide")
 st.title("ビジネス用語集ビルダー")
 
+# st.session_state の初期化は、usernameチェックより前に行う
 if 'username' not in st.session_state:
     st.session_state.username = None
 if 'current_page' not in st.session_state:
@@ -33,7 +34,7 @@ def json_serial_for_gas(obj):
     if isinstance(obj, pd.Int64Dtype.type):
         return int(obj)
     # Numpy booleanをPython booleanに変換
-    if isinstance(obj, (bool, pd.api.types.infer_dtype(obj) == 'boolean')):
+    if isinstance(obj, (bool, pd.api.types.infer_dtype(obj) == 'boolean')): # pd.api.types.infer_dtype(obj) == 'boolean' はNumPy boolにも対応
         return bool(obj)
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
@@ -144,16 +145,16 @@ def write_data_to_gas(df, sheet_name, action='write_data'):
                     processed_row.append(item.isoformat())
                 elif isinstance(item, (list, dict)):
                     try:
-                        # JSONシリアライズにjson_serial_for_gasカスタムエンコーダーを使用
                         processed_row.append(json.dumps(item, ensure_ascii=False, default=json_serial_for_gas))
                     except TypeError as e:
                         st.error(f"JSONシリアライズエラー: {e} - 問題のデータ (カラム: {col_name}): {item}")
                         processed_row.append(str(item))
-                elif isinstance(item, pd.Int64Dtype.type): # PandasのInt64型をPythonのintに変換
+                elif isinstance(item, pd.Int64Dtype.type):
                     processed_row.append(int(item))
-                elif isinstance(item, bool): # Pythonのboolはそのまま
+                elif isinstance(item, bool):
                     processed_row.append(item)
-                elif pd.api.types.is_bool_dtype(df_to_send[col_name]) and pd.notna(item): # Pandasのbool dtypeをPythonのboolに
+                # DataFrameから直接読み込んだ場合は pd.api.types.is_bool_dtype でチェック
+                elif pd.api.types.is_bool_dtype(df_to_send[col_name]) and pd.notna(item):
                     processed_row.append(bool(item))
                 else:
                     processed_row.append(item)
@@ -189,10 +190,42 @@ def write_data_to_gas(df, sheet_name, action='write_data'):
         st.error(f"データの書き込み中に予期せぬエラーが発生しました: {e}")
         return False
 
-# --- ユーザーログイン後のメインコンテンツ ---
+# --- ユーザーがログインしているかどうかにかかわらず、Welcomeページは表示可能 ---
+# Welcomeページの場合は名前入力フォームを表示
+if st.session_state.username is None and st.session_state.current_page == "Welcome":
+    st.header("Welcome to ビジネス用語集ビルダー！")
+    st.write("このアプリは、あなたのビジネス用語学習をサポートします。")
+    st.markdown("詳しい使い方は、以下のページをご参照ください。")
+    st.markdown("[使い方ガイド（Notion）](https://www.notion.so/tacoms/285383207704802ca7cdddc3a7b8271f)")
+    st.info("最初にあなたの名前を入力してください。")
+    with st.form("username_form_welcome"):
+        input_username = st.text_input("あなたの名前を入力してください")
+        submit_username = st.form_submit_button("進む")
+        if submit_username and input_username:
+            st.session_state.username = input_username
+            st.session_state.current_page = "学習モード"
+            st.rerun()
+elif st.session_state.username is None and st.session_state.current_page != "Welcome":
+    # usernameが設定されておらず、Welcomeページ以外にいる場合はWelcomeページに強制的に戻す
+    st.session_state.current_page = "Welcome"
+    st.rerun()
+
+# ユーザーログイン後のメインコンテンツ (usernameが設定されている場合のみ表示)
 if st.session_state.username:
     st.sidebar.write(f"ようこそ、**{st.session_state.username}** さん！")
     
+    # 名前を再設定するオプション
+    with st.sidebar.expander("名前を変更する"):
+        with st.form("change_username_form", clear_on_submit=False):
+            new_username = st.text_input("新しい名前を入力してください", value=st.session_state.username, key="new_username_input")
+            change_username_button = st.form_submit_button("名前を更新")
+            if change_username_button and new_username and new_username != st.session_state.username:
+                st.session_state.username = new_username
+                st.success("名前が更新されました！")
+                st.rerun()
+            elif change_username_button and new_username == st.session_state.username:
+                st.info("名前は変更されていません。")
+
     sanitized_username = "".join(filter(str.isalnum, st.session_state.username))
     current_worksheet_name = f"Sheet_{sanitized_username}"
     test_results_sheet_name = f"Sheet_TestResults_{sanitized_username}"
@@ -243,7 +276,7 @@ if st.session_state.username:
         if test_type == 'example_to_term':
             eligible_vocab_df = eligible_vocab_df[pd.notna(eligible_vocab_df['例文 (Example)']) & (eligible_vocab_df['例文 (Example)'] != '')]
 
-        if eligible_vocab_df.empty or len(eligible_vocab_df) < 4: # 最低4つの選択肢を生成するため
+        if eligible_vocab_df.empty or len(eligible_vocab_df) < 4:
             return None 
         
         actual_num_questions = min(num_questions, len(eligible_vocab_df))
@@ -414,7 +447,6 @@ if st.session_state.username:
         "データ管理"
     ]
     
-    # st.session_state.current_page を使用して、選択されたページを管理
     page_index = sidebar_options.index(st.session_state.current_page)
     new_page_selection = st.sidebar.radio("Go to", sidebar_options, index=page_index, key="sidebar_navigator")
 
@@ -423,22 +455,13 @@ if st.session_state.username:
         st.rerun()
 
     # --- 各ページの表示ロジック ---
+    # WelcomeページはusernameがNoneでない限り、通常のページとして扱われる
     if st.session_state.current_page == "Welcome":
-        st.header("Welcome to ビジネス用語集ビルダー！")
-        st.write("このアプリは、あなたのビジネス用語学習をサポートします。")
-        st.markdown("詳しい使い方は、以下のページをご参照ください。")
-        st.markdown("[使い方ガイド（Notion）](https://www.notion.so/tacoms/285383207704802ca7cdddc3a7b8271f)")
-
-        if st.session_state.username is None:
-            st.info("最初にあなたの名前を入力してください。")
-            with st.form("username_form_welcome"):
-                input_username = st.text_input("あなたの名前を入力してください")
-                submit_username = st.form_submit_button("進む")
-                if submit_username and input_username:
-                    st.session_state.username = input_username
-                    st.session_state.current_page = "学習モード" # 名前入力後、学習モードへ遷移
-                    st.rerun()
-        else:
+        if st.session_state.username is not None: # 名前が入力済みの場合のWelcomeページ
+            st.header("Welcome to ビジネス用語集ビルダー！")
+            st.write("このアプリは、あなたのビジネス用語学習をサポートします。")
+            st.markdown("詳しい使い方は、以下のページをご参照ください。")
+            st.markdown("[使い方ガイド（Notion）](https://www.notion.so/tacoms/285383207704802ca7cdddc3a7b8271f)")
             st.success(f"こんにちは、{st.session_state.username} さん！サイドバーから機能を選択して開始しましょう。")
 
     elif st.session_state.current_page == "用語一覧":
@@ -862,12 +885,10 @@ if st.session_state.username:
                             st.session_state.expanded_test_result_index = None
                             st.rerun()
                     with col_delete_result:
-                        # 削除ボタンを押したら確認フォームを表示
                         if st.button("この結果を削除", key=f"delete_result_{i}"):
                             st.session_state[f'confirm_delete_{i}'] = True
-                            st.rerun() # 確認フォームを表示するために再描画
+                            st.rerun()
                 
-                # 削除確認フォームはexpanderの外で制御
                 if st.session_state.get(f'confirm_delete_{i}', False):
                     st.warning("本当にこのテスト結果を削除しますか？")
                     with st.form(key=f"confirm_delete_form_{i}"):
@@ -879,18 +900,17 @@ if st.session_state.username:
                             if write_data_to_gas(df_test_results, test_results_sheet_name):
                                 st.success("テスト結果が削除されました。")
                                 st.session_state.expanded_test_result_index = None
-                                st.session_state[f'confirm_delete_{i}'] = False # 確認フォームを閉じる
-                                st.cache_data.clear() # df_test_resultsを再ロードするためにキャッシュクリア
+                                st.session_state[f'confirm_delete_{i}'] = False
+                                st.cache_data.clear()
                                 st.rerun()
                             else:
                                 st.error("テスト結果の削除に失敗しました。")
                         elif cancel_delete:
                             st.info("削除をキャンセルしました。")
-                            st.session_state[f'confirm_delete_{i}'] = False # 確認フォームを閉じる
+                            st.session_state[f'confirm_delete_{i}'] = False
                             st.rerun()
                 
-                # 詳細を見る/閉じるボタンをexpanderの外で制御する
-                if not is_expanded and not st.session_state.get(f'confirm_delete_{i}', False): # 削除確認フォームが表示されていない場合のみ
+                if not is_expanded and not st.session_state.get(f'confirm_delete_{i}', False):
                     if st.button("詳細を見る", key=f"open_result_{i}"):
                         st.session_state.expanded_test_result_index = i
                         st.rerun()
