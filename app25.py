@@ -34,7 +34,7 @@ def json_serial_for_gas(obj):
     if isinstance(obj, pd.Int64Dtype.type):
         return int(obj)
     # Numpy booleanをPython booleanに変換
-    if isinstance(obj, (bool, pd.api.types.infer_dtype(obj) == 'boolean')): # pd.api.types.infer_dtype(obj) == 'boolean' はNumPy boolにも対応
+    if isinstance(obj, (bool, pd.api.types.infer_dtype(obj) == 'boolean')): 
         return bool(obj)
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
@@ -129,6 +129,7 @@ def load_data_from_gas(sheet_name):
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
     except Exception as e:
         st.error(f"データの読み込み中に予期せぬエラーが発生しました: {e}")
+        st.exception(e) # デバッグ用
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
 
 def write_data_to_gas(df, sheet_name, action='write_data'):
@@ -136,36 +137,44 @@ def write_data_to_gas(df, sheet_name, action='write_data'):
         df_to_send = df.copy()
 
         processed_data_rows = []
-        for _, row in df_to_send.iterrows():
+        for index, row in df_to_send.iterrows():
             processed_row = []
             for col_name, item in row.items():
                 if pd.isna(item):
                     processed_row.append(None)
-                elif isinstance(item, (datetime, pd.Timestamp, date)):
-                    processed_row.append(item.isoformat())
-                elif isinstance(item, (list, dict)):
+                elif isinstance(item, (list, dict)): # リストや辞書は最優先でJSON文字列に変換
                     try:
                         processed_row.append(json.dumps(item, ensure_ascii=False, default=json_serial_for_gas))
+                        st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (List/Dict) converted to JSON: {processed_row[-1][:50]}...")
                     except TypeError as e:
                         st.error(f"JSONシリアライズエラー: {e} - 問題のデータ (カラム: {col_name}): {item}")
-                        processed_row.append(str(item))
+                        processed_row.append(str(item)) # fallback to string
+                        st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (List/Dict) fallback to string: {processed_row[-1][:50]}...")
+                elif isinstance(item, (datetime, pd.Timestamp, date)):
+                    processed_row.append(item.isoformat())
+                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (DateTime) converted to ISO: {processed_row[-1]}")
                 elif isinstance(item, pd.Int64Dtype.type):
                     processed_row.append(int(item))
+                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Int64) converted to int: {processed_row[-1]}")
                 elif isinstance(item, bool):
                     processed_row.append(item)
-                # DataFrameから直接読み込んだ場合は pd.api.types.is_bool_dtype でチェック
+                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Python Bool) as is: {processed_row[-1]}")
                 elif pd.api.types.is_bool_dtype(df_to_send[col_name]) and pd.notna(item):
                     processed_row.append(bool(item))
+                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Pandas Bool) converted to bool: {processed_row[-1]}")
                 else:
                     processed_row.append(item)
+                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Other Type) as is: {processed_row[-1]}")
             processed_data_rows.append(processed_row)
 
         if action == 'append_row':
             if len(processed_data_rows) != 1:
                 raise ValueError("append_row action expects exactly one row of data.")
             data_to_send = processed_data_rows[0]
+            st.sidebar.write(f"DEBUG: Data to send (append): {data_to_send[:5]}...")
         else:
             data_to_send = [df_to_send.columns.tolist()] + processed_data_rows
+            st.sidebar.write(f"DEBUG: Data to send (write): Headers: {data_to_send[0][:5]}..., First row: {data_to_send[1][:5]}...")
         
         params = {'api_key': GAS_API_KEY, 'sheet': sheet_name, 'action': action}
         headers = {'Content-Type': 'application/json'}
@@ -175,19 +184,24 @@ def write_data_to_gas(df, sheet_name, action='write_data'):
 
         if 'error' in result:
             st.error(f"GAS書き込み中にエラーが返されました: {result['error']}")
+            st.sidebar.write(f"DEBUG: GAS Error Response: {result['error']}")
             return False
         
         st.cache_data.clear()
+        st.sidebar.write(f"DEBUG: Data successfully written to GAS for sheet '{sheet_name}'.")
         return True
     except requests.exceptions.RequestException as e:
         st.error(f"GAS Webアプリへの書き込み接続に失敗しました: {e}")
         st.info(f"GAS WebアプリのURL: {GAS_WEBAPP_URL} が正しいか、デプロイされているか確認してください。")
+        st.exception(e) # デバッグ用
         return False
     except json.JSONDecodeError as e:
         st.error(f"GASからのレスポンスをJSONとして解析できませんでした。エラー: {e}。レスポンス内容: {response.text}。GASのコードを確認してください。")
+        st.exception(e) # デバッグ用
         return False
     except Exception as e:
         st.error(f"データの書き込み中に予期せぬエラーが発生しました: {e}")
+        st.exception(e) # デバッグ用
         return False
 
 # --- ユーザーがログインしているかどうかにかかわらず、Welcomeページは表示可能 ---
@@ -225,6 +239,23 @@ if st.session_state.username:
                 st.rerun()
             elif change_username_button and new_username == st.session_state.username:
                 st.info("名前は変更されていません。")
+
+    # --- デバッグ機能の追加 ---
+    with st.sidebar.expander("デバッグ情報"):
+        st.write("Streamlit Session State:")
+        st.json(st.session_state.to_dict()) # セッションステート全体を表示
+        
+        # DataFrameの概要を表示 (負荷軽減のため一部のみ)
+        if 'df_vocab' in locals() and not df_vocab.empty:
+            st.write("df_vocab info:")
+            st.dataframe(df_vocab.head(), use_container_width=True)
+            st.write(f"df_vocab columns: {df_vocab.columns.tolist()}")
+            st.write(f"df_vocab dtypes: {df_vocab.dtypes.to_dict()}")
+        if 'df_test_results' in locals() and not df_test_results.empty:
+            st.write("df_test_results info:")
+            st.dataframe(df_test_results.head(), use_container_width=True)
+            st.write(f"df_test_results columns: {df_test_results.columns.tolist()}")
+            st.write(f"df_test_results dtypes: {df_test_results.dtypes.to_dict()}")
 
     sanitized_username = "".join(filter(str.isalnum, st.session_state.username))
     current_worksheet_name = f"Sheet_{sanitized_username}"
@@ -416,12 +447,20 @@ if st.session_state.username:
             'Details': current_detailed_results
         }])
         
+        # DEBUG: テスト結果 DataFrame の内容を確認
+        st.sidebar.write("DEBUG: New test result DataFrame before sending to GAS:")
+        st.sidebar.dataframe(new_result_df_for_gas.head(), use_container_width=True)
+        st.sidebar.write(f"DEBUG: New test result DataFrame columns: {new_result_df_for_gas.columns.tolist()}")
+        st.sidebar.write(f"DEBUG: New test result DataFrame dtypes: {new_result_df_for_gas.dtypes.to_dict()}")
+
         write_success_results = write_data_to_gas(new_result_df_for_gas, test_results_sheet_name, action='append_row')
 
         if write_success_results:
             if df_test_results.empty:
                 df_test_results = pd.DataFrame(columns=TEST_RESULTS_HEADERS)
-            df_test_results = pd.concat([df_test_results, new_result_df_for_gas], ignore_index=True)
+            # append_rowアクションで成功した場合、df_test_resultsを再ロードする必要がある
+            # ここでは便宜的にconcatしているが、load_data_from_gasを再度呼び出すのが安全
+            df_test_results = load_data_from_gas(test_results_sheet_name) 
             st.success("テスト結果が保存されました！「データ管理」から確認できます。")
         else:
             st.error("テスト結果の保存に失敗しました。")
@@ -455,9 +494,8 @@ if st.session_state.username:
         st.rerun()
 
     # --- 各ページの表示ロジック ---
-    # WelcomeページはusernameがNoneでない限り、通常のページとして扱われる
     if st.session_state.current_page == "Welcome":
-        if st.session_state.username is not None: # 名前が入力済みの場合のWelcomeページ
+        if st.session_state.username is not None: 
             st.header("Welcome to ビジネス用語集ビルダー！")
             st.write("このアプリは、あなたのビジネス用語学習をサポートします。")
             st.markdown("詳しい使い方は、以下のページをご参照ください。")
@@ -772,6 +810,7 @@ if st.session_state.username:
                 elif current_idx >= total_questions:
                     st.subheader("テスト結果")
                     
+                    # ここで結果の保存を試みる
                     save_test_results_and_progress()
 
                     final_score = st.session_state.test_mode['score']
