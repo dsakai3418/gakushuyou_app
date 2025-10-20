@@ -18,14 +18,6 @@ TEST_RESULTS_HEADERS = ['Date', 'Category', 'TestType', 'Score', 'TotalQuestions
 st.set_page_config(layout="wide")
 st.title("ビジネス用語集ビルダー")
 
-# --- DEBUG START ---
-st.write(f"DEBUG: Initial st.session_state.username = {st.session_state.username if 'username' in st.session_state else 'Not Set Yet'}")
-if 'username' in st.session_state and st.session_state.username:
-    st.write(f"DEBUG: Username is set to '{st.session_state.username}', proceeding to main content.")
-else:
-    st.write("DEBUG: Username is None or empty, showing login form.")
-# --- DEBUG END ---
-
 if 'username' not in st.session_state:
     st.session_state.username = None
 
@@ -55,7 +47,8 @@ def load_data_from_gas(sheet_name):
                     return pd.DataFrame(columns=VOCAB_HEADERS)
             else:
                 st.error(f"GASからエラーが返されました: {data['error']}")
-                st.stop()
+                # st.stop() # ここで停止せず、エラーメッセージを表示して続行
+                return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
         
         if 'data' not in data or not data['data']:
             if sheet_name.startswith("Sheet_TestResults_"):
@@ -117,17 +110,21 @@ def load_data_from_gas(sheet_name):
     except requests.exceptions.HTTPError as e:
         st.error(f"GAS Webアプリへの接続に失敗しました: {e}")
         st.info(f"GAS WebアプリのURL: {GAS_WEBAPP_URL} が正しいか、デプロイされているか、またはGAS側のスクリプトにエラーがないか確認してください。")
-        st.stop()
+        # st.stop() # ここで停止せず、エラーメッセージを表示して続行
+        return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
     except requests.exceptions.RequestException as e:
         st.error(f"GAS Webアプリへの接続に失敗しました: {e}")
         st.info(f"GAS WebアプリのURL: {GAS_WEBAPP_URL} が正しいか、デプロイされているか確認してください。")
-        st.stop()
+        # st.stop() # ここで停止せず、エラーメッセージを表示して続行
+        return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
     except json.JSONDecodeError as e:
         st.error(f"GASからのレスポンスをJSONとして解析できませんでした。エラー: {e}。レスポンス内容: {response.text}。GASのコードを確認してください。")
-        st.stop()
+        # st.stop() # ここで停止せず、エラーメッセージを表示して続行
+        return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
     except Exception as e:
         st.error(f"データの読み込み中に予期せぬエラーが発生しました: {e}")
-        st.stop()
+        # st.stop() # ここで停止せず、エラーメッセージを表示して続行
+        return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
 
 def write_data_to_gas(df, sheet_name):
     try:
@@ -413,13 +410,12 @@ if st.session_state.username:
     st.sidebar.header("ナビゲーション")
     
     # デフォルトの選択を「用語の追加・編集」に変更
-    # これはdf_vocabが空でもst.stop()に繋がりにくいため、デバッグ初期表示に良い
     default_sidebar_options = [
-        "用語の追加・編集", 
         "学習モード",
         "テストモード",
         "辞書モード",
         "用語一覧", 
+        "用語の追加・編集",
         "データ管理"
     ]
     page = st.sidebar.radio("Go to", default_sidebar_options, index=0) # index=0 でデフォルトを「用語の追加・編集」に設定
@@ -537,9 +533,7 @@ if st.session_state.username:
 
         if df_vocab.empty:
             st.info("学習する用語がありません。「用語の追加・編集」から追加してください。")
-            # st.stop() # ここをコメントアウト
-        else: # df_vocabが空でなければ、通常ロジックを実行
-        
+        else:
             all_categories = ['全てのカテゴリ'] + sorted(df_vocab['カテゴリ (Category)'].dropna().unique().tolist())
             progress_options = ['全ての進捗', 'Not Started', 'Learning', 'Mastered']
 
@@ -574,9 +568,8 @@ if st.session_state.username:
                 st.info("この条件に一致する用語は見つかりませんでした。")
                 st.session_state.learning_mode['filtered_df_indices'] = []
                 st.session_state.learning_mode['current_index_in_filtered'] = 0
-                # st.stop() # ここをコメントアウト
             
-            if not filtered_df.empty: # st.stop()がコメントアウトされたので、ここで再度チェック
+            if not filtered_df.empty:
                 total_terms_in_filtered = len(filtered_df)
                 current_display_index_in_filtered = st.session_state.learning_mode['current_index_in_filtered']
 
@@ -623,9 +616,7 @@ if st.session_state.username:
 
         if df_vocab.empty:
             st.info("辞書に登録された用語がありません。「用語の追加・編集」から追加してください。")
-            # st.stop() # ここをコメントアウト
-        else: # df_vocabが空でなければ、通常ロジックを実行
-        
+        else:
             all_categories = ['全てのカテゴリ'] + sorted(df_vocab['カテゴリ (Category)'].dropna().unique().tolist())
 
             search_col, category_col = st.columns([2, 1])
@@ -663,7 +654,7 @@ if st.session_state.username:
                     
                     is_expanded = (st.session_state.dictionary_mode['expanded_term_id'] == row['ID'])
 
-                    with st.expander(f"**{row['用語 (Term)']}.** （カテゴリ: {row['カテゴリ (Category)']}）", 
+                    with st.expander(f"**{row['用語 (Term)']}. （カテゴリ: {row['カテゴリ (Category)']}）**", 
                                       expanded=is_expanded):
                         st.write(f"### 説明")
                         st.markdown(f"**{row['説明 (Definition)']}**")
@@ -671,10 +662,12 @@ if st.session_state.username:
                             st.write(f"### 例文")
                             st.markdown(f"*{row['例文 (Example)']}*")
                         
+                        # expander内の閉じるボタンがクリックされたら、stateを更新してrerun
                         if st.button("閉じる", key=f"close_dict_{row['ID']}"):
                             st.session_state.dictionary_mode['expanded_term_id'] = None
                             st.rerun()
                     
+                    # expanderが閉じている場合に「詳細を見る」ボタンを表示
                     if not is_expanded:
                         if st.button("詳細を見る", key=f"open_dict_{row['ID']}"):
                             st.session_state.dictionary_mode['expanded_term_id'] = row['ID']
@@ -685,9 +678,7 @@ if st.session_state.username:
         st.header("テストモード")
         if df_vocab.empty:
             st.info("テストする用語がありません。「用語の追加・編集」から追加してください。")
-            # st.stop() # ここをコメントアウト
-        else: # df_vocabが空でなければ、通常ロジックを実行
-
+        else:
             all_categories_for_test = ['全てのカテゴリ'] + sorted(df_vocab['カテゴリ (Category)'].dropna().unique().tolist())
             
             if not st.session_state.test_mode['is_active']:
@@ -695,7 +686,8 @@ if st.session_state.username:
                     st.warning("中断中のテストがあります。")
                     if st.button("テストを再開", key="resume_test_button"):
                         resume_test()
-                        st.stop() 
+                        # st.stop() # rerun()で十分
+                        st.rerun()
 
                 st.subheader("新しいテストを開始")
                 test_type_selection = st.radio("テストタイプ:", 
@@ -736,7 +728,6 @@ if st.session_state.username:
                         st.session_state.test_mode['answers'] = []
                         st.session_state.test_mode['detailed_results'] = []
                         st.rerun()
-                    # st.stop() # ここをコメントアウト
                 elif current_idx >= total_questions:
                     st.subheader("テスト結果")
                     
@@ -786,7 +777,9 @@ if st.session_state.username:
 
                     with st.form(key=f"question_form_{current_idx}"):
                         default_choice_index = 0
-                        if st.session_state.test_mode['answers'][current_idx] in current_question['choices']:
+                        # 回答済みの場合、その選択肢をデフォルトにする
+                        if st.session_state.test_mode['answers'][current_idx] is not None and \
+                           st.session_state.test_mode['answers'][current_idx] in current_question['choices']:
                             try:
                                 default_choice_index = current_question['choices'].index(st.session_state.test_mode['answers'][current_idx])
                             except ValueError:
@@ -858,7 +851,9 @@ if st.session_state.username:
                             st.rerun()
                     with col_delete_result:
                         if st.button("この結果を削除", key=f"delete_result_{i}"):
-                            if st.warning("本当にこのテスト結果を削除しますか？"):
+                            # 削除確認メッセージを出す前に、本当に削除するかをユーザーに確認する
+                            st.warning("本当にこのテスト結果を削除しますか？")
+                            if st.button("はい、削除します", key=f"confirm_delete_result_{i}"):
                                 df_test_results = df_test_results.drop(index=i).reset_index(drop=True)
                                 if write_data_to_gas(df_test_results, test_results_sheet_name):
                                     st.success("テスト結果が削除されました。")
@@ -866,6 +861,8 @@ if st.session_state.username:
                                     st.rerun()
                                 else:
                                     st.error("テスト結果の削除に失敗しました。")
+                            else: # 「はい、削除します」が押されなかった場合
+                                st.info("削除をキャンセルしました。")
                 
                 # 詳細を見る/閉じるボタンをexpanderの外で制御する
                 if not is_expanded:
