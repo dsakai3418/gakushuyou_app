@@ -140,32 +140,50 @@ def write_data_to_gas(df, sheet_name, action='write_data'):
         for index, row in df_to_send.iterrows():
             processed_row = []
             for col_name, item in row.items():
-                if pd.isna(item):
+                st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} - Original item: {item}, Type: {type(item)}")
+
+                if pd.isna(item): # ここでエラーが出ている
                     processed_row.append(None)
-                elif isinstance(item, (list, dict)): # リストや辞書は最優先でJSON文字列に変換
+                    st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (isna) appended None.")
+                elif isinstance(item, (list, dict, pd.Series, pd.DataFrame)): # リスト、辞書、Series, DataFrameは最優先でJSON文字列に変換
                     try:
-                        processed_row.append(json.dumps(item, ensure_ascii=False, default=json_serial_for_gas))
-                        st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (List/Dict) converted to JSON: {processed_row[-1][:50]}...")
+                        # Pandas Series/DataFrameの場合、内部の値を考慮してJSON化するか、そのまま文字列化
+                        if isinstance(item, pd.Series) or isinstance(item, pd.DataFrame):
+                            # Series/DataFrameの場合、値をJSONとして表現するのが最も適切
+                            # to_json()を使うと、Seriesの場合は値のリスト、DataFrameの場合はオブジェクトのリストとして出力される
+                            # ただし、GASで適切に処理されるように、dict形式に変換してからjson.dumpsするのが安全
+                            if isinstance(item, pd.Series):
+                                json_item = item.to_dict() # Seriesを辞書に変換
+                            else: # pd.DataFrame
+                                json_item = item.to_dict(orient='records') # DataFrameを辞書のリストに変換
+                            processed_row.append(json.dumps(json_item, ensure_ascii=False, default=json_serial_for_gas))
+                        else: # Python list or dict
+                            processed_row.append(json.dumps(item, ensure_ascii=False, default=json_serial_for_gas))
+                        st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (List/Dict/Series/DataFrame) converted to JSON: {processed_row[-1][:100]}...")
                     except TypeError as e:
                         st.error(f"JSONシリアライズエラー: {e} - 問題のデータ (カラム: {col_name}): {item}")
                         processed_row.append(str(item)) # fallback to string
-                        st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (List/Dict) fallback to string: {processed_row[-1][:50]}...")
+                        st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (List/Dict/Series/DataFrame) fallback to string: {processed_row[-1][:100]}...")
                 elif isinstance(item, (datetime, pd.Timestamp, date)):
                     processed_row.append(item.isoformat())
                     st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (DateTime) converted to ISO: {processed_row[-1]}")
                 elif isinstance(item, pd.Int64Dtype.type):
                     processed_row.append(int(item))
                     st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Int64) converted to int: {processed_row[-1]}")
-                elif isinstance(item, bool):
+                elif isinstance(item, bool): # Pythonのbool型
                     processed_row.append(item)
                     st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Python Bool) as is: {processed_row[-1]}")
-                elif pd.api.types.is_bool_dtype(df_to_send[col_name]) and pd.notna(item):
+                elif pd.api.types.is_bool_dtype(df_to_send[col_name]) and pd.notna(item): # Pandasのブール型カラムの非NaN値
+                    # ここでitemが複数要素を持つ配列である可能性は低いが、念のため
                     processed_row.append(bool(item))
                     st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Pandas Bool) converted to bool: {processed_row[-1]}")
                 else:
                     processed_row.append(item)
                     st.sidebar.write(f"DEBUG: Row {index}, Col {col_name} (Other Type) as is: {processed_row[-1]}")
             processed_data_rows.append(processed_row)
+
+        # 後続の処理... (変更なし)
+        # ...
 
         if action == 'append_row':
             if len(processed_data_rows) != 1:
