@@ -9,7 +9,7 @@ from datetime import datetime, date
 # --- 設定項目 ---
 # ★★★ 自分のGAS_WEBAPP_URLに置き換える ★★★
 # このURLはGASプロジェクトをデプロイした後に発行されます
-GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxDRKO66MDCw2EwwB2m3PZ71YIbCs560NPdLUML4ThSBd67qFKvd9J5n5X6HgLHm3b0vQ/exec" 
+GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyejI7Yp4SXPzPBTpVy3nqKUZwAK96nbSs24eO3VCFf2msCUm-opAwVpg2rjquwyo4Rnw/exec" 
 # ★★★ 自分のGAS_API_KEYに置き換える ★★★
 GAS_API_KEY = "my_streamlit_secret_key_123" 
 
