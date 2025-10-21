@@ -47,6 +47,12 @@ if 'test_review_mode' not in st.session_state:
         'review_index': 0,
         'results_to_review': []
     }
+# df_vocab と df_test_results もセッションステートで管理する
+if 'df_vocab' not in st.session_state:
+    st.session_state.df_vocab = pd.DataFrame(columns=VOCAB_HEADERS)
+if 'df_test_results' not in st.session_state:
+    st.session_state.df_test_results = pd.DataFrame(columns=TEST_RESULTS_HEADERS)
+
 
 # ユーザー名に応じたスプレッドシート名の設定 (usernameがNoneの場合は一時的なデフォルト)
 current_worksheet_name = f"Sheet_Vocab_{st.session_state.username}" if st.session_state.username else "Sheet_Vocab_Default"
@@ -80,6 +86,7 @@ def json_serial_for_gas(obj):
 
 @st.cache_data(ttl=60)
 def load_data_from_gas(sheet_name):
+    st.sidebar.write(f"DEBUG: Attempting to load data from sheet: {sheet_name}")
     try:
         params = {'api_key': GAS_API_KEY, 'sheet': sheet_name, 'action': 'read_data'}
         response = requests.get(GAS_WEBAPP_URL, params=params)
@@ -96,9 +103,11 @@ def load_data_from_gas(sheet_name):
                     return pd.DataFrame(columns=VOCAB_HEADERS)
             else:
                 st.error(f"GASからエラーが返されました: {data['error']}")
+                st.sidebar.write(f"DEBUG: GAS Error during read: {data['error']}")
                 return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
         
         if 'data' not in data or not data['data']:
+            st.sidebar.write(f"DEBUG: No data found in sheet '{sheet_name}'. Returning empty DataFrame.")
             if sheet_name.startswith("Sheet_TestResults_"):
                 return pd.DataFrame(columns=TEST_RESULTS_HEADERS)
             else:
@@ -108,6 +117,7 @@ def load_data_from_gas(sheet_name):
         
         # ヘッダーとデータを分離
         if not gas_values:
+             st.sidebar.write(f"DEBUG: gas_values is empty for sheet '{sheet_name}'. Returning empty DataFrame.")
              if sheet_name.startswith("Sheet_TestResults_"):
                  return pd.DataFrame(columns=TEST_RESULTS_HEADERS)
              else:
@@ -155,21 +165,26 @@ def load_data_from_gas(sheet_name):
             else:
                 df['Details'] = [[] for _ in range(len(df))]
 
+        st.sidebar.write(f"DEBUG: Successfully loaded {len(df)} rows from sheet '{sheet_name}'.")
         return df
     except requests.exceptions.HTTPError as e:
         st.error(f"GAS Webアプリへの接続に失敗しました: {e}")
         st.info(f"GAS WebアプリのURL: {GAS_WEBAPP_URL} が正しいか、デプロイされているか、またはGAS側のスクリプトにエラーがないか確認してください。")
+        st.sidebar.write(f"DEBUG: HTTP Error: {e}")
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
     except requests.exceptions.RequestException as e:
         st.error(f"GAS Webアプリへの接続に失敗しました: {e}")
         st.info(f"GAS WebアプリのURL: {GAS_WEBAPP_URL} が正しいか、デプロイされているか確認してください。")
+        st.sidebar.write(f"DEBUG: Request Error: {e}")
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
     except json.JSONDecodeError as e:
         st.error(f"GASからのレスポンスをJSONとして解析できませんでした。エラー: {e}。レスポンス内容: {response.text}。GASのコードを確認してください。")
+        st.sidebar.write(f"DEBUG: JSON Decode Error: {e}, Response: {response.text}")
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
     except Exception as e:
         st.error(f"データの読み込み中に予期せぬエラーが発生しました: {e}")
         st.exception(e)
+        st.sidebar.write(f"DEBUG: Unexpected Error during load: {e}")
         return pd.DataFrame(columns=TEST_RESULTS_HEADERS if sheet_name.startswith("Sheet_TestResults_") else VOCAB_HEADERS)
 
 def write_data_to_gas(df, sheet_name, action='write_data'):
@@ -214,46 +229,57 @@ def write_data_to_gas(df, sheet_name, action='write_data'):
         st.error(f"GAS Webアプリへの書き込み接続に失敗しました: {e}")
         st.info(f"GAS WebアプリのURL: {GAS_WEBAPP_URL} が正しいか、デプロイされているか確認してください。")
         st.exception(e)
+        st.sidebar.write(f"DEBUG: Request Error during write: {e}")
         return False
     except json.JSONDecodeError as e:
         st.error(f"GASからのレスポンスをJSONとして解析できませんでした。エラー: {e}。レスポンス内容: {response.text}。GASのコードを確認してください。")
         st.exception(e)
+        st.sidebar.write(f"DEBUG: JSON Decode Error during write: {e}, Response: {response.text}")
         return False
     except Exception as e:
         st.error(f"データの書き込み中に予期せぬエラーが発生しました: {e}")
         st.exception(e)
+        st.sidebar.write(f"DEBUG: Unexpected Error during write: {e}")
         return False
 
-# --- データロードと初期化 ---
-# ユーザー名が設定されていない場合は、一旦デフォルトの空のDataFrameを初期化
-# ユーザー名設定後に再度ロードし直す
+# --- メインロジック ---
+
+# ユーザー名が設定されていない場合（ログイン前）は、ログインフォームを表示
 if st.session_state.username is None:
-    df_vocab = pd.DataFrame(columns=VOCAB_HEADERS)
-    df_test_results = pd.DataFrame(columns=TEST_RESULTS_HEADERS)
-else:
+    st.session_state.current_page = "Welcome" # 念のためcurrent_pageをWelcomeに設定
+    st.header("Welcome to ビジネス用語集ビルダー！")
+    st.write("このアプリは、あなたのビジネス用語学習をサポートします。")
+    st.markdown("詳しい使い方は、以下のページをご参照ください。")
+    st.markdown("[使い方ガイド（Notion）](https://www.notion.so/tacoms/285383207704802ca7cdddc3a7b8271f)")
+    st.info("最初にあなたの名前を入力してください。")
+    with st.form("username_form_welcome_fallback"): # ユニークなフォームキー
+        input_username = st.text_input("あなたの名前を入力してください")
+        submit_username = st.form_submit_button("進む")
+        if submit_username and input_username:
+            st.session_state.username = input_username
+            # ユーザー名が設定されたので、関連するシート名も更新
+            current_worksheet_name = f"Sheet_Vocab_{st.session_state.username}"
+            test_results_sheet_name = f"Sheet_TestResults_{st.session_state.username}"
+            # 新しいユーザー名でデータをロードし直す
+            with st.spinner(f"{st.session_state.username}さんのデータをロード中..."):
+                st.session_state.df_vocab = load_data_from_gas(current_worksheet_name)
+                st.session_state.df_test_results = load_data_from_gas(test_results_sheet_name)
+                st.session_state.vocab_data_loaded = True
+            st.session_state.current_page = "学習モード" # ログイン後、学習モードへ
+            st.rerun()
+else: # ユーザーがログインしている場合
+    # ユーザー名が設定されているが、データがまだロードされていない場合はロードする
     if not st.session_state.vocab_data_loaded:
-        with st.spinner("データをロード中..."):
-            df_vocab = load_data_from_gas(current_worksheet_name)
-            df_test_results = load_data_from_gas(test_results_sheet_name)
+        with st.spinner(f"{st.session_state.username}さんのデータをロード中..."):
+            st.session_state.df_vocab = load_data_from_gas(f"Sheet_Vocab_{st.session_state.username}")
+            st.session_state.df_test_results = load_data_from_gas(f"Sheet_TestResults_{st.session_state.username}")
             st.session_state.vocab_data_loaded = True
-    else: # 既にロード済みの場合はセッションステートから取得
-        if 'df_vocab' not in st.session_state or 'df_test_results' not in st.session_state:
-            # 万が一セッションステートにない場合は再ロード (リロード時など)
-            with st.spinner("データをロード中..."):
-                df_vocab = load_data_from_gas(current_worksheet_name)
-                df_test_results = load_data_from_gas(test_results_sheet_name)
-        else:
-            df_vocab = st.session_state.df_vocab
-            df_test_results = st.session_state.df_test_results
+    
+    # ここからはセッションステートからDataFrameを取得して使用
+    df_vocab = st.session_state.df_vocab
+    df_test_results = st.session_state.df_test_results
 
-
-# --- ページ遷移関数 ---
-def go_to_page(page_name):
-    st.session_state.current_page = page_name
-    st.rerun()
-
-# --- 共通サイドバー ---
-if st.session_state.username: # ログイン済みの場合のみサイドバーを表示
+    # --- 共通サイドバー ---
     st.sidebar.title(f"ようこそ、{st.session_state.username}さん！")
     
     # ページ選択ボタン
@@ -273,6 +299,8 @@ if st.session_state.username: # ログイン済みの場合のみサイドバー
         new_term = st.text_input("用語", key="sidebar_new_term")
         new_definition = st.text_area("説明", key="sidebar_new_definition")
         new_example = st.text_area("例文 (任意)", key="sidebar_new_example")
+        
+        # カテゴリの選択肢は、df_vocabが空でなければそこから取得
         categories = df_vocab['カテゴリ (Category)'].dropna().unique().tolist() if not df_vocab.empty else []
         new_category = st.selectbox("カテゴリ", [''] + categories + ['新しいカテゴリを作成'], key="sidebar_new_category")
         
@@ -283,7 +311,7 @@ if st.session_state.username: # ログイン済みの場合のみサイドバー
         
         submitted = st.form_submit_button("用語を追加")
         if submitted:
-            if new_term and new_definition and new_category:
+            if new_term and new_definition and new_category and new_category != '新しいカテゴリを作成': # ここで新しいカテゴリ作成中の状態をチェック
                 next_id = (df_vocab['ID'].max() + 1) if not df_vocab.empty else 1
                 new_row = pd.DataFrame([{
                     'ID': next_id,
@@ -305,7 +333,7 @@ if st.session_state.username: # ログイン済みの場合のみサイドバー
                 else:
                     st.error("用語の追加に失敗しました。")
             else:
-                st.error("用語、説明、カテゴリは必須です。")
+                st.error("用語、説明、有効なカテゴリは必須です。")
     
     st.sidebar.markdown("---")
     if st.sidebar.button("ログアウト", key="logout_button"):
@@ -313,47 +341,21 @@ if st.session_state.username: # ログイン済みの場合のみサイドバー
         st.session_state.current_page = "Welcome"
         st.session_state.vocab_data_loaded = False # ログアウト時にデータロードフラグをリセット
         st.cache_data.clear() # キャッシュもクリア
+        # セッションステートのDataFrameもクリア
+        st.session_state.df_vocab = pd.DataFrame(columns=VOCAB_HEADERS)
+        st.session_state.df_test_results = pd.DataFrame(columns=TEST_RESULTS_HEADERS)
         st.rerun()
 
-# --- メインコンテンツ ---
-
-# ★★★ ログインウィンドウ表示ロジックの改善 ★★★
-# usernameが設定されていない場合、常にWelcomeページの内容を表示
-if st.session_state.username is None:
-    st.session_state.current_page = "Welcome" # 念のためcurrent_pageをWelcomeに設定
-    st.header("Welcome to ビジネス用語集ビルダー！")
-    st.write("このアプリは、あなたのビジネス用語学習をサポートします。")
-    st.markdown("詳しい使い方は、以下のページをご参照ください。")
-    st.markdown("[使い方ガイド（Notion）](https://www.notion.so/tacoms/285383207704802ca7cdddc3a7b8271f)")
-    st.info("最初にあなたの名前を入力してください。")
-    with st.form("username_form_welcome_fallback"): # ユニークなフォームキー
-        input_username = st.text_input("あなたの名前を入力してください")
-        submit_username = st.form_submit_button("進む")
-        if submit_username and input_username:
-            st.session_state.username = input_username
-            # ユーザー名が設定されたので、関連するシート名も更新
-            current_worksheet_name = f"Sheet_Vocab_{st.session_state.username}"
-            test_results_sheet_name = f"Sheet_TestResults_{st.session_state.username}"
-            # 新しいユーザー名でデータをロードし直す
-            with st.spinner(f"{st.session_state.username}さんのデータをロード中..."):
-                df_vocab = load_data_from_gas(current_worksheet_name)
-                df_test_results = load_data_from_gas(test_results_sheet_name)
-                st.session_state.df_vocab = df_vocab # セッションステートに保存
-                st.session_state.df_test_results = df_test_results # セッションステートに保存
-                st.session_state.vocab_data_loaded = True
-            st.session_state.current_page = "学習モード" # ログイン後、学習モードへ
-            st.rerun()
-else: # ユーザーがログインしている場合
-    st.session_state.df_vocab = df_vocab # メインコンテンツ表示前にDFをセッションステートに保存
-    st.session_state.df_test_results = df_test_results # 同上
-
+    # --- メインコンテンツ ---
     if st.session_state.current_page == "データ管理":
         st.header("📊 データ管理")
         st.write("登録されているビジネス用語の一覧を表示・編集できます。")
         
         if df_vocab.empty:
             st.info("まだ用語が登録されていません。サイドバーから新しい用語を追加してください。")
+            st.sidebar.write(f"DEBUG: df_vocab is empty. Columns: {df_vocab.columns.tolist()}")
         else:
+            st.sidebar.write(f"DEBUG: df_vocab has {len(df_vocab)} rows.")
             edited_df = st.data_editor(
                 df_vocab,
                 column_config={
@@ -373,7 +375,6 @@ else: # ユーザーがログインしている場合
             
             if st.button("変更を保存", key="save_data_management"):
                 # 新しいカテゴリ作成時の処理
-                # エラーフラグを立てて、後続の処理に進まないようにする
                 has_category_error = False
                 for idx, row in edited_df.iterrows():
                     if row['カテゴリ (Category)'] == '新しいカテゴリを作成':
@@ -381,10 +382,12 @@ else: # ユーザーがログインしている場合
                         has_category_error = True
                 
                 if has_category_error: # カテゴリエラーがあればここで処理を停止
-                    st.stop() # Streamlitの実行を停止
+                    st.stop() 
 
                 # 必須カラムのチェック
-                if edited_df[['用語 (Term)', '説明 (Definition)', 'カテゴリ (Category)']].isnull().values.any():
+                # edited_dfにNaNを含む行があるか、および指定カラムが空文字になっていないか
+                required_cols = ['用語 (Term)', '説明 (Definition)', 'カテゴリ (Category)']
+                if edited_df[required_cols].isnull().values.any() or (edited_df[required_cols] == '').any().any():
                     st.error("用語、説明、カテゴリは必須です。空欄がないか確認してください。")
                     st.stop() # 必須カラムエラーがあればここで処理を停止
                 else:
@@ -393,7 +396,7 @@ else: # ユーザーがログインしている場合
                     for idx, row in new_rows.iterrows():
                         next_id = (df_vocab['ID'].max() + 1) if not df_vocab.empty else 1
                         edited_df.loc[idx, 'ID'] = next_id
-
+                    
                     # edited_dfをdf_vocabに代入し、GASに書き込む
                     df_vocab = edited_df.astype({'ID': 'Int64'}) # IDをInt64型に強制
                     if write_data_to_gas(df_vocab, current_worksheet_name):
@@ -504,9 +507,16 @@ else: # ユーザーがログインしている場合
             
             # プレビュー表示用のDataFrameを作成
             display_df_test_results = df_test_results.copy()
-            # Detailsカラムは表示用に「詳細を見る」ボタンに置き換える
-            display_df_test_results['Details'] = ['詳細を見る'] * len(display_df_test_results)
-
+            # Detailsカラムは表示用に「詳細を見る」ボタンに置き換える（エラー回避のため一時的にコメントアウトまたはTextColumnに変更）
+            # Streamlitのバージョンが古い場合はButtonColumnが使えないため
+            # display_df_test_results['Details'] = ['詳細を見る'] * len(display_df_test_results)
+            
+            # === ButtonColumn を使用しない場合のフォールバック ===
+            # Streamlitのバージョンが 1.26.0 未満の場合、ButtonColumnは存在しません。
+            # そのため、代わりに通常のTextColumnとして表示するか、
+            # 詳細表示用のselectboxと連携させる方法を推奨します。
+            # 以下は一旦TextColumnとして表示する例です。
+            
             st.dataframe(
                 display_df_test_results,
                 column_config={
@@ -515,21 +525,13 @@ else: # ユーザーがログインしている場合
                     "TestType": "テスト形式",
                     "Score": "スコア",
                     "TotalQuestions": "出題数",
-                    "Details": st.column_config.ButtonColumn("詳細", help="テスト結果の詳細を表示します", width="small")
+                    # "Details": st.column_config.ButtonColumn("詳細", help="テスト結果の詳細を表示します", width="small") # エラー回避のためコメントアウト
+                    "Details": st.column_config.TextColumn("詳細", help="各問題の詳細データ (ここではJSON文字列)"), # 代替
                 },
                 hide_index=True,
                 use_container_width=True
             )
 
-            # 「詳細を見る」ボタンが押された場合の処理
-            # data_editorの戻り値でボタンが押されたかどうかを確認
-            # しかし、st.dataframeはボタンクリックを直接イベントとして返さないため、迂回策が必要
-            # 今回はDataframe自体に「詳細を見る」が表示されているので、ユーザーがそれをクリックしたときに
-            # st.session_state.test_review_mode['active'] = True に設定するロジックが必要だが
-            # st.dataframeから直接クリックイベントを拾うのは困難。
-            # そこで、以下のようにindexを手動で選び直す形式にするか、
-            # 別途「行を選択して詳細を表示」のようなボタンを用意する。
-            
             st.markdown("---")
             st.subheader("選択したテスト結果の詳細")
             if not df_test_results.empty:
@@ -566,6 +568,8 @@ else: # ユーザーがログインしている場合
 
 # --- テストモード関連関数 ---
 def generate_questions():
+    global df_vocab # df_vocabが更新される可能性があるのでglobalで参照
+
     filtered_df = df_vocab.copy()
 
     # カテゴリでフィルタリング
@@ -590,6 +594,11 @@ def generate_questions():
     
     if filtered_df.empty or len(filtered_df) < st.session_state.test_mode['question_count']:
         st.warning(f"指定された条件（カテゴリ: {st.session_state.test_mode['selected_category']}、出題元: {st.session_state.test_mode['question_source']}）に合う十分な用語が見つかりませんでした。全カテゴリからランダムに {st.session_state.test_mode['question_count']} 問出題します。")
+        # df_vocabが空の場合にsampleを呼ぶとエラーになるのでチェック
+        if df_vocab.empty:
+            st.error("用語が登録されていません。テストを開始できません。")
+            st.session_state.test_mode['active'] = False
+            return
         filtered_df = df_vocab.sample(n=min(len(df_vocab), st.session_state.test_mode['question_count']), random_state=random.randint(0, 10000))
     else:
         filtered_df = filtered_df.sample(n=st.session_state.test_mode['question_count'], random_state=random.randint(0, 10000))
@@ -614,10 +623,13 @@ def generate_questions():
             if len(wrong_options_df) >= 3:
                 wrong_answers = wrong_options_df.sample(n=3)['説明 (Definition)'].tolist()
             else:
-                # 3つ見つからない場合、利用可能なものを全て含める
                 wrong_answers = wrong_options_df['説明 (Definition)'].tolist()
-                # 足りない分はダミーで埋めるなど工夫が必要だが、ここではシンプルに
-                while len(wrong_answers) < 3:
+                # 足りない分は他の用語の説明で埋める（ユニーク性を考慮）
+                while len(wrong_answers) < 3 and len(df_vocab) > len(wrong_answers) + 1: # 無限ループ防止
+                    additional_def = df_vocab.sample(n=1)['説明 (Definition)'].iloc[0]
+                    if additional_def not in options and additional_def != correct_answer:
+                        wrong_answers.append(additional_def)
+                while len(wrong_answers) < 3: #それでも足りなければダミー
                     wrong_answers.append(f"ダミーの説明 {len(wrong_answers) + 1}")
             
             options = [correct_answer] + wrong_answers
@@ -640,15 +652,23 @@ def generate_questions():
             if len(wrong_options_df) >= 3:
                 wrong_answers = wrong_options_df.sample(n=3)['用語 (Term)'].tolist()
             else:
-                # 3つ見つからない場合、利用可能なものを全て含める
                 wrong_answers = wrong_options_df['用語 (Term)'].tolist()
-                # 足りない分はダミーで埋めるなど工夫が必要だが、ここではシンプルに
-                while len(wrong_answers) < 3:
+                # 足りない分は他の用語名で埋める（ユニーク性を考慮）
+                while len(wrong_answers) < 3 and len(df_vocab) > len(wrong_answers) + 1: # 無限ループ防止
+                    additional_term = df_vocab.sample(n=1)['用語 (Term)'].iloc[0]
+                    if additional_term not in options and additional_term != correct_answer:
+                        wrong_answers.append(additional_term)
+                while len(wrong_answers) < 3: #それでも足りなければダミー
                     wrong_answers.append(f"ダミー用語 {len(wrong_answers) + 1}")
 
             options = [correct_answer] + wrong_answers
             random.shuffle(options)
         
+        # オプションが空または少なすぎる場合のチェック
+        if not options or len(options) < 2:
+            st.warning(f"用語 '{row['用語 (Term)']}' の問題生成に失敗しました (選択肢が不足)。この問題はスキップされます。")
+            continue
+
         questions_list.append({
             'term_id': row['ID'],
             'term_name': row['用語 (Term)'],
@@ -748,11 +768,12 @@ def save_test_results_and_progress():
                     df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Learning'
                 elif current_progress == 'Learning':
                     df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Mastered'
-            else:
-                if current_progress == 'Mastered':
+            else: # 不正解の場合
+                if current_progress == 'Mastered': # MasteredからLearningに戻す
                     df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Learning'
+                # LearningやNot Startedの場合は変更しない (またはNot Startedに戻すロジックもありうる)
                 elif current_progress == 'Learning':
-                    df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Not Started'
+                    df_vocab.loc[row_idx, '学習進捗 (Progress)'] = 'Not Started' # LearningからNot Startedに戻す
             updated_vocab_ids.add(q['term_id'])
 
     st.session_state.test_mode['score'] = final_score
@@ -768,9 +789,12 @@ def save_test_results_and_progress():
         'example_to_term': '例文→用語'
     }[st.session_state.test_mode['test_type']]
 
-    # df_test_resultsがまだ空の場合はヘッダーを先に作成
-    if df_test_results.empty:
+    # df_test_resultsがまだ空の場合はヘッダーを先に作成 (これはロード時に行われるべきだが念のため)
+    if df_test_results.empty and not st.session_state.df_test_results.empty:
+         df_test_results = st.session_state.df_test_results # セッションステートから取得
+    elif df_test_results.empty: # まだ空の場合は初期化
         df_test_results = pd.DataFrame(columns=TEST_RESULTS_HEADERS)
+
 
     # 新しい結果を行として追加
     new_result_row_data = {
@@ -783,15 +807,14 @@ def save_test_results_and_progress():
     }
     # pandas.concatの代わりに_appendを使用 (将来のバージョンでのwarning回避のため)
     df_test_results = df_test_results._append(new_result_row_data, ignore_index=True)
+    st.session_state.df_test_results = df_test_results # セッションステートも更新
 
     # write_data_to_gasにDataFrame全体を渡す
     # write_data_to_gas内でDetailsカラムのjson.dumpsが適用される
     write_success_results = write_data_to_gas(df_test_results, test_results_sheet_name)
 
     if write_success_results:
-        st.success("テスト結果が保存されました！「データ管理」から確認できます。")
-        # 保存成功後、df_test_resultsを再ロードして最新の状態にする
-        # df_test_results = load_data_from_gas(test_results_sheet_name) # キャッシュクリアにより自動で最新がロードされる
+        st.success("テスト結果が保存されました！「テスト結果」ページから確認できます。")
     else:
         st.error("テスト結果の保存に失敗しました。")
 
@@ -799,5 +822,11 @@ def save_test_results_and_progress():
         write_success_vocab = write_data_to_gas(df_vocab, current_worksheet_name)
         if write_success_vocab:
             st.success("学習進捗が更新されました！")
+            st.session_state.df_vocab = df_vocab # セッションステートも更新
         else:
             st.error("学習進捗の更新に失敗しました。")
+
+# --- ページ遷移関数 (変更なし) ---
+def go_to_page(page_name):
+    st.session_state.current_page = page_name
+    st.rerun()
