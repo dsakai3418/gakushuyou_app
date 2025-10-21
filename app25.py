@@ -21,6 +21,11 @@ TEST_RESULTS_HEADERS = ['Date', 'Category', 'TestType', 'Score', 'TotalQuestions
 st.set_page_config(layout="wide")
 st.title("ビジネス用語集ビルダー")
 
+# --- ページ遷移関数 (ここに追加) ---
+def go_to_page(page_name):
+    st.session_state.current_page = page_name
+    st.rerun()
+
 # st.session_state の初期化
 if 'username' not in st.session_state:
     st.session_state.username = None
@@ -825,8 +830,3 @@ def save_test_results_and_progress():
             st.session_state.df_vocab = df_vocab # セッションステートも更新
         else:
             st.error("学習進捗の更新に失敗しました。")
-
-# --- ページ遷移関数 (変更なし) ---
-def go_to_page(page_name):
-    st.session_state.current_page = page_name
-    st.rerun()
