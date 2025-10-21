@@ -263,7 +263,7 @@ if st.session_state.username is None:
         if submit_username and input_username:
             st.session_state.username = input_username
             # ユーザー名が設定されたので、関連するシート名も更新
-            current_worksheet_name = f"Sheet_Vocab_{st.session_state.username}"
+            current_worksheet_name = f"Sheet_{st.session_state.username}"
             test_results_sheet_name = f"Sheet_TestResults_{st.session_state.username}"
             # 新しいユーザー名でデータをロードし直す
             with st.spinner(f"{st.session_state.username}さんのデータをロード中..."):
