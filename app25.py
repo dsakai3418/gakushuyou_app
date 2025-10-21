@@ -373,21 +373,27 @@ else: # ユーザーがログインしている場合
             
             if st.button("変更を保存", key="save_data_management"):
                 # 新しいカテゴリ作成時の処理
+                # エラーフラグを立てて、後続の処理に進まないようにする
+                has_category_error = False
                 for idx, row in edited_df.iterrows():
                     if row['カテゴリ (Category)'] == '新しいカテゴリを作成':
                         st.error(f"行 {idx+1}: '新しいカテゴリを作成'が選択されています。有効なカテゴリを選択または入力してください。")
-                        return # 保存を中止
+                        has_category_error = True
                 
-                # 'ID'がNaNになっている新規行を特定し、IDを付与
-                new_rows = edited_df[edited_df['ID'].isna()]
-                for idx, row in new_rows.iterrows():
-                    next_id = (df_vocab['ID'].max() + 1) if not df_vocab.empty else 1
-                    edited_df.loc[idx, 'ID'] = next_id
-                
+                if has_category_error: # カテゴリエラーがあればここで処理を停止
+                    st.stop() # Streamlitの実行を停止
+
                 # 必須カラムのチェック
                 if edited_df[['用語 (Term)', '説明 (Definition)', 'カテゴリ (Category)']].isnull().values.any():
                     st.error("用語、説明、カテゴリは必須です。空欄がないか確認してください。")
+                    st.stop() # 必須カラムエラーがあればここで処理を停止
                 else:
+                    # 'ID'がNaNになっている新規行を特定し、IDを付与
+                    new_rows = edited_df[edited_df['ID'].isna()]
+                    for idx, row in new_rows.iterrows():
+                        next_id = (df_vocab['ID'].max() + 1) if not df_vocab.empty else 1
+                        edited_df.loc[idx, 'ID'] = next_id
+
                     # edited_dfをdf_vocabに代入し、GASに書き込む
                     df_vocab = edited_df.astype({'ID': 'Int64'}) # IDをInt64型に強制
                     if write_data_to_gas(df_vocab, current_worksheet_name):
