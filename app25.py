@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-# requestsとjsonはGASを使わない場合は不要だが、汎用性のため残す
 import requests
 import json
 import os
@@ -9,15 +8,9 @@ from datetime import datetime, date
 import io
 
 # --- Supabase 接続のインポート ---
-# ★★★ この行がエラーの原因なので、ここがimportできるようになるのが目標 ★★★
 from st_supabase_connection import SupabaseConnection
 
 # --- 設定項目 ---
-# GASのURLとキーはSupabase移行に伴い不要になるため削除
-# GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzIHdzvPWRgu3uyOb2A1rHQTvpxzU6sLKBm5Ybwt--ozxLFe0_i7nr071RjwjgdkaxGA/exec"
-# GAS_API_KEY = "my_streamlit_secret_key_123"
-
-# ヘッダー定義
 VOCAB_HEADERS = ['ID', '用語 (Term)', '説明 (Definition)', '例文 (Example)', 'カテゴリ (Category)', '学習進捗 (Progress)']
 TEST_RESULTS_HEADERS = ['Date', 'Category', 'TestType', 'Score', 'TotalQuestions', 'Details']
 
@@ -25,17 +18,12 @@ TEST_RESULTS_HEADERS = ['Date', 'Category', 'TestType', 'Score', 'TotalQuestions
 st.set_page_config(layout="wide")
 st.title("ビジネス用語集ビルダー")
 
-# --- ページ遷移関数 ---
-def go_to_page(page_name):
-    st.session_state.current_page = page_name
-    st.rerun()
-
 # st.session_state の初期化
 if 'username' not in st.session_state:
     st.session_state.username = None
 if 'current_page' not in st.session_state:
-    st.session_state.current_page = "用語集" # デフォルトページを用語集に変更
-if 'vocab_data_loaded' not in st.session_state: # データロード済みフラグ
+    st.session_state.current_page = "用語集"
+if 'vocab_data_loaded' not in st.session_state:
     st.session_state.vocab_data_loaded = False
 if 'test_mode' not in st.session_state:
     st.session_state.test_mode = {
@@ -56,7 +44,6 @@ if 'test_review_mode' not in st.session_state:
         'review_index': 0,
         'results_to_review': []
     }
-# df_vocab と df_test_results もセッションステートで管理する
 if 'df_vocab' not in st.session_state:
     st.session_state.df_vocab = pd.DataFrame(columns=VOCAB_HEADERS)
 if 'df_test_results' not in st.session_state:
@@ -66,18 +53,84 @@ if 'df_test_results' not in st.session_state:
 # --- Supabase 接続の初期化 (st.secrets から認証情報を取得) ---
 @st.cache_resource
 def get_supabase_connection():
-    # st.secrets から安全に認証情報を取得
     url = st.secrets.get("SUPABASE_URL")
     key = st.secrets.get("SUPABASE_KEY")
 
     if not url or not key:
         st.error("Supabaseの認証情報が見つかりません。Streamlit CloudのSecretsまたは.streamlit/secrets.tomlにSUPABASE_URLとSUPABASE_KEYを設定してください。")
-        st.stop() # 処理を停止してエラーを表示
+        st.stop()
 
     return st.connection("supabase", type=SupabaseConnection, url=url, key=key)
 
 supabase = get_supabase_connection()
 
+# --- テーブルが存在しない場合に自動で作成する関数 ---
+# この関数は、Supabaseプロジェクトに public.execute_sql 関数が作成されていることを前提とします。
+def create_table_if_not_exists(table_name, headers, is_vocab_table=True):
+    st.sidebar.write(f"DEBUG: Checking for table '{table_name}'...")
+    try:
+        # テーブルが存在するか確認 (簡単なクエリを試す)
+        # 存在しない場合、st-supabase-connectionはAPIErrorを発生させる
+        supabase.table(table_name).select('ID').limit(0).execute()
+        st.sidebar.write(f"DEBUG: Table '{table_name}' already exists.")
+        return True
+    except Exception as e:
+        # テーブルが存在しない場合、エラー（PGRST205など）が発生する
+        # APIErrorかどうかをチェックして、存在しない場合にのみ作成処理に進む
+        if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 404: # 実際は404ではなくAPIErrorのコードをチェック
+            st.sidebar.write(f"DEBUG: Table '{table_name}' does not exist (HTTP 404), creating it.")
+        elif "PGRST205" in str(e): # PGRST205はPostgRESTがテーブルを見つけられないエラーコード
+             st.sidebar.write(f"DEBUG: Table '{table_name}' does not exist (PGRST205), creating it.")
+        else:
+            st.sidebar.write(f"DEBUG: Unknown error when checking table '{table_name}': {e}. Attempting to create.")
+        
+        # テーブル作成クエリ
+        if is_vocab_table:
+            columns_sql = ", ".join([f'"{h}" text NULL' for h in headers if h != 'ID'])
+            create_query = f"""
+            CREATE TABLE public."{table_name}" (
+                "ID" bigint NOT NULL,
+                {columns_sql},
+                CONSTRAINT "{table_name}_pkey" PRIMARY KEY ("ID")
+            );
+            """
+        else: # test_results_ table
+            create_query = f"""
+            CREATE TABLE public."{table_name}" (
+                "Date" timestamp with time zone NULL,
+                "Category" text NULL,
+                "TestType" text NULL,
+                "Score" bigint NULL,
+                "TotalQuestions" bigint NULL,
+                "Details" jsonb NULL
+            );
+            """
+        
+        try:
+            # SQLを実行してテーブルを作成 (RPC経由)
+            st.sidebar.write(f"DEBUG: Executing create table query for '{table_name}'...")
+            supabase.rpc("execute_sql", {'sql_query': create_query}).execute()
+            st.sidebar.write(f"DEBUG: Successfully created table '{table_name}'.")
+
+            # RLSポリシーも自動で追加 (開発用、本番では見直し推奨)
+            # 全員にアクセスを許可するポリシー
+            rls_policy_query = f"""
+            CREATE POLICY "Enable all access for anon users on {table_name}"
+            ON public."{table_name}"
+            FOR ALL
+            TO anon
+            USING (TRUE)
+            WITH CHECK (TRUE);
+            """
+            st.sidebar.write(f"DEBUG: Executing RLS policy query for '{table_name}'...")
+            supabase.rpc("execute_sql", {'sql_query': rls_policy_query}).execute()
+            st.sidebar.write(f"DEBUG: RLS policy added for table '{table_name}'.")
+            return True
+        except Exception as create_e:
+            st.error(f"テーブル '{table_name}' の作成中にエラーが発生しました: {create_e}")
+            st.exception(create_e)
+            st.sidebar.write(f"DEBUG: Table creation error: {create_e}")
+            return False
 
 # --- Supabaseからデータをロードする関数 (GAS版からの変更) ---
 @st.cache_data(ttl=60)
@@ -149,41 +202,28 @@ def load_data_from_supabase(table_name):
 # --- Supabaseにデータを書き込む関数 (GAS版からの変更) ---
 def write_data_to_supabase(df, table_name):
     try:
-        # Supabaseに送るデータはPythonのリストオブ辞書形式
-        # Pandas DataFrameをJSON形式に変換する前に、DateTimeオブジェクトをISOフォーマットに変換する必要がある
         data_to_upsert = df.to_dict(orient='records')
         
-        # Detailsカラムの処理（SupabaseはJSONB型で格納するため、そのままPythonのリスト/辞書として渡す）
-        # to_dict(orient='records')はデフォルトでこれを適切に処理するはず
-
-        # Upsert (存在すれば更新、なければ挿入) を使用
-        # Supabaseのテーブルには主キー（通常はID）があることを前提とする
-        # IDが自動生成の場合は、IDを無視してinsertする
-        
-        # まずは既存のレコードをすべて削除し、新しいデータを挿入する方式で実装
-        # これはデータ量が少ない場合にのみ適しており、大規模データでは非効率
-        # 理想的には、変更された行のみを更新、削除された行を削除、追加された行を挿入する
-        
-        # 簡単のために、今回は「全削除＆全挿入」で実装
-        # 実際には、IDを基にupdate/insertを使い分けるか、upsertを使うのが良い
-        # `supabase.table(table_name).upsert(data_to_upsert, on_conflict='ID').execute()`
-        
-        # ここではまずシンプルなdelete().execute() & insert().execute()を試す
-        
-        # 既存データを全削除
+        # 既存データを全削除 (ID = -1 は存在しないと仮定して、全行を対象)
         st.sidebar.write(f"DEBUG: Deleting all existing data from table '{table_name}'...")
-        delete_response = supabase.table(table_name).delete().neq('ID', -1).execute() # ID=-1は存在しないと仮定
-        # .execute()の戻り値はdata, count, status_codeなどを含むオブジェクト
-        if delete_response.data is None: # Supabase client >= 2.0.0
-             st.sidebar.write(f"DEBUG: Successfully cleared table '{table_name}'.")
-        else: # Supabase client < 2.0.0 (old behavior, data might contain deleted rows)
-            st.sidebar.write(f"DEBUG: Successfully cleared table '{table_name}'. Deleted {len(delete_response.data)} rows.")
+        # delete().neq('ID', -1) は、IDが-1でないすべての行を削除するという意図。
+        # SupabaseのPythonクライアントで全削除するには、select('*').execute() でIDを取得してから削除するか、
+        # あるいは RLS を考慮しないなら .delete().gt('ID', 0) などで全行対象にするのが確実。
+        # ここでは一番シンプルな .delete().neq('ID', -1).execute() で行が返されることを期待する
+        # .data が None でないことを確認して、成功を判断する
+        delete_response = supabase.table(table_name).delete().neq('ID', -1).execute() 
+        
+        if delete_response.data is not None or delete_response.count >= 0: # 削除が正常に行われたと判断
+             st.sidebar.write(f"DEBUG: Successfully cleared table '{table_name}'. Deleted {delete_response.count} rows.")
+        else:
+            st.warning(f"DEBUG: Could not confirm clearing table '{table_name}'. Response: {delete_response}")
+
 
         # 新しいデータを挿入
         st.sidebar.write(f"DEBUG: Inserting {len(data_to_upsert)} rows into table '{table_name}'...")
         insert_response = supabase.table(table_name).insert(data_to_upsert).execute()
         
-        if insert_response.data:
+        if insert_response.data: # 挿入されたデータが返されれば成功
             st.cache_data.clear() # キャッシュをクリアして、次回の読み込みで最新データを取得させる
             st.sidebar.write(f"DEBUG: Data successfully written to Supabase table '{table_name}'.")
             return True
@@ -202,31 +242,39 @@ def write_data_to_supabase(df, table_name):
 # --- メインロジック ---
 
 # ユーザー名に応じたテーブル名の設定 (usernameがNoneの場合は一時的なデフォルト)
-# Supabaseのテーブル名は小文字推奨、ハイフンではなくアンダースコア推奨
-# `vocab_`と`test_results_`というプレフィックスを付ける
 current_vocab_table_name = f"vocab_{st.session_state.username.lower()}" if st.session_state.username else "vocab_default"
 current_test_results_table_name = f"test_results_{st.session_state.username.lower()}" if st.session_state.username else "test_results_default"
 
 
 # ユーザー名が設定されていない場合（ログイン前）は、ログインフォームを表示
 if st.session_state.username is None:
-    st.session_state.current_page = "Welcome" # 念のためcurrent_pageをWelcomeに設定
+    st.session_state.current_page = "Welcome"
     st.header("Welcome to ビジネス用語集ビルダー！")
     st.write("このアプリは、あなたのビジネス用語学習をサポートします。")
     st.markdown("詳しい使い方は、以下のページをご参照ください。")
     st.markdown("[使い方ガイド（Notion）](https://www.notion.so/tacoms/285383207704802ca7cdddc3a7b8271f)")
     st.info("最初にあなたの名前を入力してください。")
-    with st.form("username_form_welcome_fallback"): # ユニークなフォームキー
-        input_username = st.text_input("あなたの名前を入力してください")
+    with st.form("username_form_welcome_fallback"):
+        input_username = st.text_input("あなたの名前を入力してください", key="login_username_input")
         submit_username = st.form_submit_button("進む")
         if submit_username and input_username:
             st.session_state.username = input_username
             # ユーザー名が設定されたので、関連するテーブル名も更新
             current_vocab_table_name = f"vocab_{st.session_state.username.lower()}"
             current_test_results_table_name = f"test_results_{st.session_state.username.lower()}"
-            # 新しいユーザー名でデータをロードし直す
-            with st.spinner(f"{st.session_state.username}さんのデータをロード中..."):
-                # Supabaseからデータをロード
+            
+            with st.spinner(f"{st.session_state.username}さんのテーブルとデータを準備中..."):
+                # テーブル自動生成
+                if not create_table_if_not_exists(current_vocab_table_name, VOCAB_HEADERS, is_vocab_table=True):
+                    st.error("用語集テーブルの準備に失敗しました。")
+                    st.session_state.username = None # 失敗したらログインをキャンセル
+                    st.rerun()
+                if not create_table_if_not_exists(current_test_results_table_name, TEST_RESULTS_HEADERS, is_vocab_table=False):
+                    st.error("テスト結果テーブルの準備に失敗しました。")
+                    st.session_state.username = None # 失敗したらログインをキャンセル
+                    st.rerun()
+
+                # 新しいユーザー名でデータをロードし直す
                 st.session_state.df_vocab = load_data_from_supabase(current_vocab_table_name)
                 st.session_state.df_test_results = load_data_from_supabase(current_test_results_table_name)
                 st.session_state.vocab_data_loaded = True
@@ -236,7 +284,17 @@ if st.session_state.username is None:
 else: # ユーザーがログインしている場合
     # ユーザー名が設定されているが、データがまだロードされていない場合はロードする
     if not st.session_state.vocab_data_loaded:
-        with st.spinner(f"{st.session_state.username}さんのデータをロード中..."):
+        with st.spinner(f"{st.session_state.username}さんのテーブルとデータを準備中..."):
+            # テーブル自動生成
+            if not create_table_if_not_exists(current_vocab_table_name, VOCAB_HEADERS, is_vocab_table=True):
+                st.error("用語集テーブルの準備に失敗しました。")
+                st.session_state.username = None # 失敗したらログインをキャンセル
+                st.rerun()
+            if not create_table_if_not_exists(current_test_results_table_name, TEST_RESULTS_HEADERS, is_vocab_table=False):
+                st.error("テスト結果テーブルの準備に失敗しました。")
+                st.session_state.username = None # 失敗したらログインをキャンセル
+                st.rerun()
+
             # Supabaseからデータをロード
             st.session_state.df_vocab = load_data_from_supabase(current_vocab_table_name)
             st.session_state.df_test_results = load_data_from_supabase(current_test_results_table_name)
@@ -522,282 +580,282 @@ else: # ユーザーがログインしている場合
                 st.subheader("テスト設定")
                 categories = df_vocab['カテゴリ (Category)'].dropna().unique().tolist()
                 
+                st.session_state.
+            if not st.session_state.test_mode['active']:
+                st.subheader("テスト設定")
+                categories = df_vocab['カテゴリ (Category)'].dropna().unique().tolist()
+                
                 st.session_state.test_mode['selected_category'] = st.selectbox(
                     "テストカテゴリを選択", ['全カテゴリ'] + categories, key="test_category_select")
                 
-                # ★★★ ここからコードが途切れていました ★★★
-                # 以下の部分を app25.py に追加してください。
                 st.session_state.test_mode['question_count'] = st.slider(
-                    "出題数", 5, min(len(df_vocab), 50), 
-                    st.session_state.test_mode['question_count'], 
-                    key="test_question_count"
-                )
+                    "問題数", min_value=5, max_value=len(df_vocab), value=min(10, len(df_vocab)), step=1, key="test_question_count_slider")
                 
                 st.session_state.test_mode['test_type'] = st.radio(
-                    "出題形式", 
-                    [
-                        ("用語から説明", "term_to_def"),
-                        ("例文から用語", "example_to_term")
-                    ],
-                    format_func=lambda x: x[0],
-                    key="test_type_radio"
-                )[1] # タプルの2番目の要素 (識別子) を取得
+                    "テスト形式",
+                    [('用語から説明を選ぶ', 'term_to_def'),
+                     ('例文から用語を選ぶ', 'example_to_term')],
+                    format_func=lambda x: x[0], key="test_type_radio"
+                )[1] # タプルの2番目の要素（キー）を取得
                 
                 st.session_state.test_mode['question_source'] = st.radio(
-                    "問題選択",
-                    [
-                        ("全用語からランダム", "random_all"),
-                        ("学習進捗が「Learning」の用語にフォーカス", "learning_focus")
-                    ],
-                    format_func=lambda x: x[0],
-                    key="question_source_radio"
-                )[1] # タプルの2番目の要素 (識別子) を取得
+                    "出題元",
+                    [('ランダム (全用語から)', 'random_all'),
+                     ('学習不足用語から優先的に', 'learning_focus')],
+                    format_func=lambda x: x[0], key="test_source_radio"
+                )[1]
 
-                if st.button("テスト開始", key="start_test"):
-                    start_test(df_vocab)
+                if st.button("テスト開始", key="start_test_button"):
+                    start_new_test(df_vocab)
             else:
-                run_test(df_vocab)
+                run_test(df_vocab, current_test_results_table_name)
 
     elif st.session_state.current_page == "テスト結果":
         st.header("📈 テスト結果")
-        st.write("過去のテスト結果をレビューできます。")
+        st.write("過去のテスト結果を閲覧できます。")
 
         if df_test_results.empty:
-            st.info("まだテスト結果がありません。テストモードで学習を始めましょう！")
+            st.info("まだテスト結果がありません。テストモードで学習を開始しましょう！")
         else:
-            if not st.session_state.test_review_mode['active']:
-                # テスト結果の概要表示
-                st.subheader("過去のテスト一覧")
+            # テスト結果の概要表示
+            st.subheader("テスト結果一覧")
+            display_df_test_results = df_test_results.copy()
+            # 表示用のカラムを選択し、必要であればフォーマット
+            display_df_test_results['Date'] = display_df_test_results['Date'].dt.strftime('%Y-%m-%d %H:%M')
+            st.dataframe(
+                display_df_test_results[['Date', 'Category', 'TestType', 'Score', 'TotalQuestions']],
+                use_container_width=True,
+                hide_index=True
+            )
+
+            # 詳細レビュー機能
+            st.subheader("テスト結果の詳細レビュー")
+            if len(df_test_results) > 0:
+                result_dates = df_test_results['Date'].dt.strftime('%Y-%m-%d %H:%M').tolist()
+                selected_result_index = st.selectbox("レビューするテスト結果を選択", range(len(result_dates)),
+                                                     format_func=lambda x: result_dates[x], key="review_select_result")
                 
-                # 表示する列を絞り込む
-                display_df_test_results = df_test_results[['Date', 'Category', 'TestType', 'Score', 'TotalQuestions']].copy()
-                display_df_test_results['Date'] = display_df_test_results['Date'].dt.strftime('%Y-%m-%d %H:%M')
-                
-                # テストタイプ表示を分かりやすく
-                display_df_test_results['TestType'] = display_df_test_results['TestType'].apply(
-                    lambda x: "用語から説明" if x == "term_to_def" else "例文から用語" if x == "example_to_term" else x
-                )
-                
-                st.dataframe(display_df_test_results, use_container_width=True)
-
-                selected_row_index = st.number_input("詳細を確認するテストの行番号 (0から)", min_value=0, max_value=len(df_test_results)-1, value=0, key="review_index_select")
-                if st.button("このテスト結果をレビュー", key="start_review"):
-                    if 0 <= selected_row_index < len(df_test_results):
-                        st.session_state.test_review_mode['active'] = True
-                        st.session_state.test_review_mode['results_to_review'] = df_test_results.iloc[selected_row_index]['Details']
-                        st.session_state.test_review_mode['review_index'] = 0
-                        st.rerun()
-                    else:
-                        st.error("無効な行番号です。")
-            else:
-                review_test_results()
-
-
-# --- テストモード関連のヘルパー関数 ---
-
-def start_test(df_vocab):
-    # 問題の準備
-    questions_df = df_vocab.copy()
-
-    # カテゴリで絞り込み
-    if st.session_state.test_mode['selected_category'] != '全カテゴリ':
-        questions_df = questions_df[questions_df['カテゴリ (Category)'] == st.session_state.test_mode['selected_category']]
-    
-    # 問題のソースで絞り込み
-    if st.session_state.test_mode['question_source'] == 'learning_focus':
-        questions_df = questions_df[questions_df['学習進捗 (Progress)'] == 'Learning']
-        if questions_df.empty and not df_vocab[df_vocab['学習進捗 (Progress)'] == 'Learning'].empty:
-            st.warning("選択されたカテゴリに「Learning」の用語がありませんでした。全用語からランダムに出題します。")
-            questions_df = df_vocab.copy() # 全用語に戻す
-        elif questions_df.empty:
-            st.warning("「Learning」の用語がありませんでした。全用語からランダムに出題します。")
-            questions_df = df_vocab.copy() # 全用語に戻す
-
-    if len(questions_df) < st.session_state.test_mode['question_count']:
-        st.warning(f"指定された条件に一致する用語が{len(questions_df)}個しかありませんでした。全問出題します。")
-        num_questions = len(questions_df)
-    else:
-        num_questions = st.session_state.test_mode['question_count']
-
-    # ランダムに問題を選択
-    if not questions_df.empty:
-        st.session_state.test_mode['questions'] = questions_df.sample(n=num_questions).to_dict(orient='records')
-        st.session_state.test_mode['answers'] = [None] * num_questions
-        st.session_state.test_mode['score'] = 0
-        st.session_state.test_mode['detailed_results'] = []
-        st.session_state.test_mode['current_question_index'] = 0
-        st.session_state.test_mode['active'] = True
-        st.rerun()
-    else:
-        st.error("問題を作成できる用語が見つかりませんでした。用語集に用語を追加してください。")
-
-
-def run_test(df_vocab):
-    total_questions = len(st.session_state.test_mode['questions'])
-    current_index = st.session_state.test_mode['current_question_index']
-    
-    if current_index >= total_questions:
-        # テスト終了
-        st.subheader("テスト結果")
-        score_percentage = (st.session_state.test_mode['score'] / total_questions) * 100
-        st.metric("正答率", f"{score_percentage:.1f}%", f"{st.session_state.test_mode['score']} / {total_questions}")
-
-        # 詳細結果の表示
-        st.subheader("詳細")
-        for i, result in enumerate(st.session_state.test_mode['detailed_results']):
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                st.write(f"**Q.{i+1}**")
-            with col2:
-                st.write(f"**用語:** {result['term']}")
-                if st.session_state.test_mode['test_type'] == 'term_to_def':
-                    st.write(f"**質問:** {result['term']}")
-                    st.markdown(f"**正解:** {result['correct_answer']}")
-                elif st.session_state.test_mode['test_type'] == 'example_to_term':
-                    st.write(f"**質問 (例文):** {result['example']}")
-                    st.markdown(f"**正解:** {result['correct_answer']}")
-
-                if result['is_correct']:
-                    st.success(f"あなたの回答: {result['user_answer']} (正解)")
-                else:
-                    st.error(f"あなたの回答: {result['user_answer']} (不正解)")
-                st.markdown("---")
+                if st.button("このテスト結果をレビュー", key="start_review_button"):
+                    st.session_state.test_review_mode['active'] = True
+                    st.session_state.test_review_mode['review_index'] = 0
+                    st.session_state.test_review_mode['results_to_review'] = df_test_results.loc[selected_result_index, 'Details']
+                    go_to_page("テスト結果") # 現在のページをリロードしてレビュー表示を開始
             
-            # 学習進捗の更新
-            if not result['is_correct']:
-                # 不正解なら進捗を「Learning」に戻す
-                term_id_to_update = result['id']
-                if term_id_to_update in df_vocab['ID'].values:
-                    df_vocab.loc[df_vocab['ID'] == term_id_to_update, '学習進捗 (Progress)'] = 'Learning'
-                    # Supabaseに書き込み（テスト結果とは別に）
-                    write_data_to_supabase(df_vocab, current_vocab_table_name)
-        
-        # テスト結果を保存
-        new_test_result_row = pd.DataFrame([{
-            'Date': datetime.now(),
-            'Category': st.session_state.test_mode['selected_category'],
-            'TestType': st.session_state.test_mode['test_type'],
-            'Score': st.session_state.test_mode['score'],
-            'TotalQuestions': total_questions,
-            'Details': st.session_state.test_mode['detailed_results']
-        }])
-        st.session_state.df_test_results = pd.concat([st.session_state.df_test_results, new_test_result_row], ignore_index=True)
-        # Supabaseに書き込み
-        if write_data_to_supabase(st.session_state.df_test_results, current_test_results_table_name):
-            st.success("テスト結果を保存しました。")
-        else:
-            st.error("テスト結果の保存に失敗しました。")
+            if st.session_state.test_review_mode['active']:
+                review_current_question = st.session_state.test_review_mode['results_to_review'][st.session_state.test_review_mode['review_index']]
+                
+                st.markdown(f"#### 問題 {st.session_state.test_review_mode['review_index'] + 1} / {len(st.session_state.test_review_mode['results_to_review'])}")
+                
+                st.write(f"**出題:** {review_current_question['question_text']}")
+                st.write(f"**正解:** {review_current_question['correct_answer']}")
+                st.write(f"**あなたの回答:** {review_current_question['user_answer']}")
+                
+                if review_current_question['is_correct']:
+                    st.success("✅ 正解")
+                else:
+                    st.error("❌ 不正解")
+                
+                st.markdown("---")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.session_state.test_review_mode['review_index'] > 0:
+                        if st.button("⬅️ 前の問題", key="prev_review_question"):
+                            st.session_state.test_review_mode['review_index'] -= 1
+                            st.rerun()
+                with col2:
+                    if st.session_state.test_review_mode['review_index'] < len(st.session_state.test_review_mode['results_to_review']) - 1:
+                        if st.button("次の問題 ➡️", key="next_review_question"):
+                            st.session_state.test_review_mode['review_index'] += 1
+                            st.rerun()
+                    else:
+                        st.info("すべての問題のレビューが完了しました。")
+                        if st.button("レビューを終了", key="end_review_mode"):
+                            st.session_state.test_review_mode['active'] = False
+                            st.rerun()
 
-        if st.button("テストを終了する", key="end_test"):
-            st.session_state.test_mode['active'] = False
-            st.rerun()
-        
+    else: # Welcomeページ (ログイン前)
+        # このブロックは、上記で既にログイン前処理として実装済みのため、ここでは何もしない
+        pass
+
+
+# --- テストモード関連関数 ---
+def start_new_test(df_vocab):
+    test_settings = st.session_state.test_mode
+
+    # 選択されたカテゴリでフィルタリング
+    if test_settings['selected_category'] == '全カテゴリ':
+        available_vocab = df_vocab.copy()
     else:
-        # 質問の表示
-        current_question = st.session_state.test_mode['questions'][current_index]
-        st.subheader(f"Q.{current_index + 1} / {total_questions}")
+        available_vocab = df_vocab[df_vocab['カテゴリ (Category)'] == test_settings['selected_category']].copy()
 
+    if available_vocab.empty or len(available_vocab) < test_settings['question_count']:
+        st.error("選択された条件で十分な問題を作成できませんでした。カテゴリや問題数を見直してください。")
+        st.session_state.test_mode['active'] = False
+        return
+
+    # 出題元に基づくフィルタリングと選択
+    if test_settings['question_source'] == 'learning_focus':
+        # 'Not Started' と 'Learning' の用語を優先
+        focus_vocab = available_vocab[available_vocab['学習進捗 (Progress)'].isin(['Not Started', 'Learning'])]
+        if len(focus_vocab) >= test_settings['question_count']:
+            selected_questions_df = focus_vocab.sample(n=test_settings['question_count'], random_state=random.randint(0, 10000))
+        elif len(focus_vocab) > 0: # 優先用語が足りなければ、残りをランダムに補完
+            st.warning(f"学習不足用語が{len(focus_vocab)}件しかありませんでした。残りは他の用語からランダムに選択します。")
+            remaining_count = test_settings['question_count'] - len(focus_vocab)
+            other_vocab = available_vocab[~available_vocab.index.isin(focus_vocab.index)]
+            selected_questions_df = pd.concat([
+                focus_vocab,
+                other_vocab.sample(n=remaining_count, random_state=random.randint(0, 10000))
+            ])
+        else: # 学習不足用語がない場合
+            st.info("学習不足用語が見つからなかったため、全用語からランダムに選択します。")
+            selected_questions_df = available_vocab.sample(n=test_settings['question_count'], random_state=random.randint(0, 10000))
+    else: # 'random_all'
+        selected_questions_df = available_vocab.sample(n=test_settings['question_count'], random_state=random.randint(0, 10000))
+
+    questions = []
+    for index, row in selected_questions_df.iterrows():
+        correct_answer = ""
         question_text = ""
-        correct_answer_term = current_question['用語 (Term)']
-        correct_answer_def = current_question['説明 (Definition)']
+        if test_settings['test_type'] == 'term_to_def':
+            question_text = f"用語: **{row['用語 (Term)']}** の説明として正しいものを選びなさい。"
+            correct_answer = row['説明 (Definition)']
+            options_pool = available_vocab['説明 (Definition)'].tolist()
+        elif test_settings['test_type'] == 'example_to_term':
+            if pd.isna(row['例文 (Example)']) or row['例文 (Example)'] == '':
+                # 例文がない場合はスキップするか、他の形式にフォールバック
+                continue 
+            question_text = f"例文: 「*{row['例文 (Example)']}*」 が示す用語として正しいものを選びなさい。"
+            correct_answer = row['用語 (Term)']
+            options_pool = available_vocab['用語 (Term)'].tolist()
         
-        if st.session_state.test_mode['test_type'] == 'term_to_def':
-            question_text = f"**{current_question['用語 (Term)']}** の説明は何ですか？"
-            correct_answer = correct_answer_def
-        elif st.session_state.test_mode['test_type'] == 'example_to_term':
-            question_text = f"以下の例文が指す**用語**は何ですか？\n\n「{current_question['例文 (Example)']}」"
-            correct_answer = correct_answer_term
+        # 選択肢を作成 (正解と異なるダミー選択肢を3つ追加)
+        options = [correct_answer]
+        dummy_options = [opt for opt in options_pool if opt != correct_answer]
+        options.extend(random.sample(dummy_options, min(3, len(dummy_options))))
+        random.shuffle(options)
 
-        st.markdown(question_text)
-        
-        user_answer = st.text_input("あなたの回答:", key=f"answer_{current_index}")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("次の問題へ", key=f"next_question_{current_index}"):
-                is_correct = False
-                if st.session_state.test_mode['test_type'] == 'term_to_def':
-                    is_correct = (user_answer.strip().lower() == correct_answer_def.strip().lower())
-                elif st.session_state.test_mode['test_type'] == 'example_to_term':
-                    is_correct = (user_answer.strip().lower() == correct_answer_term.strip().lower())
-                
-                if is_correct:
-                    st.session_state.test_mode['score'] += 1
-                
-                st.session_state.test_mode['detailed_results'].append({
-                    'id': current_question['ID'],
-                    'term': current_question['用語 (Term)'],
-                    'definition': current_question['説明 (Definition)'],
-                    'example': current_question['例文 (Example)'],
-                    'category': current_question['カテゴリ (Category)'],
-                    'question_type': st.session_state.test_mode['test_type'],
-                    'question_text': question_text,
-                    'user_answer': user_answer,
-                    'correct_answer': correct_answer,
-                    'is_correct': is_correct
-                })
-                
-                # 学習進捗の更新（ここで即時更新ではなく、テスト終了時にまとめて更新するように変更）
-                # if not is_correct:
-                #    df_vocab.loc[df_vocab['ID'] == current_question['ID'], '学習進捗 (Progress)'] = 'Learning'
-                #    write_data_to_supabase(df_vocab, current_vocab_table_name)
-                #    st.session_state.df_vocab = df_vocab # セッションステートも更新
-
-                st.session_state.test_mode['current_question_index'] += 1
-                st.rerun()
-        with col2:
-            if st.button("テストを中断する", key=f"interrupt_test_{current_index}"):
-                st.session_state.test_mode['active'] = False
-                st.rerun()
-
-def review_test_results():
-    st.subheader("テスト結果レビュー")
-    results = st.session_state.test_review_mode['results_to_review']
-    current_review_index = st.session_state.test_review_mode['review_index']
-
-    if not results:
-        st.info("レビューする詳細結果がありません。")
-        if st.button("レビューを終了する", key="end_review_no_results"):
-            st.session_state.test_review_mode['active'] = False
-            go_to_page("テスト結果")
+        questions.append({
+            'term_id': row['ID'],
+            'term': row['用語 (Term)'],
+            'definition': row['説明 (Definition)'],
+            'example': row['例文 (Example)'],
+            'category': row['カテゴリ (Category)'],
+            'question_text': question_text,
+            'correct_answer': correct_answer,
+            'options': options
+        })
+    
+    # 選択肢がない問題がスキップされた場合を考慮
+    if not questions:
+        st.error("選択された条件で有効な問題を作成できませんでした。例文が設定されていない用語が含まれている可能性があります。")
+        st.session_state.test_mode['active'] = False
         return
 
-    total_results = len(results)
-    if current_review_index >= total_results:
-        st.info("全てのテスト結果のレビューが完了しました！")
-        if st.button("レビューを終了する", key="end_review_completed"):
-            st.session_state.test_review_mode['active'] = False
-            go_to_page("テスト結果")
-        return
+    st.session_state.test_mode['active'] = True
+    st.session_state.test_mode['current_question_index'] = 0
+    st.session_state.test_mode['questions'] = questions
+    st.session_state.test_mode['answers'] = [None] * len(questions)
+    st.session_state.test_mode['score'] = 0
+    st.session_state.test_mode['detailed_results'] = []
+    st.rerun()
 
-    result = results[current_review_index]
 
-    st.write(f"**問題 {current_review_index + 1} / {total_results}**")
-    st.write(f"**用語:** {result['term']}")
+def run_test(df_vocab, current_test_results_table_name):
+    test_mode = st.session_state.test_mode
+    current_question = test_mode['questions'][test_mode['current_question_index']]
+
+    st.subheader(f"問題 {test_mode['current_question_index'] + 1} / {len(test_mode['questions'])}")
+    st.markdown(current_question['question_text'])
+
+    user_answer = st.radio(
+        "回答を選択してください:",
+        current_question['options'],
+        key=f"q_{test_mode['current_question_index']}"
+    )
     
-    if result['question_type'] == 'term_to_def':
-        st.write(f"**質問:** {result['term']}")
-        st.markdown(f"**正解:** {result['correct_answer']}")
-    elif result['question_type'] == 'example_to_term':
-        st.write(f"**質問 (例文):** {result['example']}")
-        st.markdown(f"**正解:** {result['correct_answer']}")
-
-    if result['is_correct']:
-        st.success(f"あなたの回答: {result['user_answer']} (正解)")
-    else:
-        st.error(f"あなたの回答: {result['user_answer']} (不正解)")
-    
-    st.markdown("---")
+    st.session_state.test_mode['answers'][test_mode['current_question_index']] = user_answer
 
     col1, col2 = st.columns(2)
     with col1:
-        if current_review_index < total_results - 1:
-            if st.button("次の結果へ", key="next_review_button"):
-                st.session_state.test_review_mode['review_index'] += 1
+        if st.button("前の問題", key="prev_q"):
+            if test_mode['current_question_index'] > 0:
+                test_mode['current_question_index'] -= 1
                 st.rerun()
-        else:
-            st.info("最後の結果です。")
     with col2:
-        if st.button("レビューを終了する", key="end_review_button"):
-            st.session_state.test_review_mode['active'] = False
-            go_to_page("テスト結果")
+        if st.button("次の問題", key="next_q"):
+            if test_mode['current_question_index'] < len(test_mode['questions']) - 1:
+                test_mode['current_question_index'] += 1
+                st.rerun()
+            else: # 最終問題の次を押したとき
+                end_test(df_vocab, current_test_results_table_name)
+
+
+def end_test(df_vocab, current_test_results_table_name):
+    test_mode = st.session_state.test_mode
+    total_score = 0
+    detailed_results = []
+
+    for i, question in enumerate(test_mode['questions']):
+        user_answer = test_mode['answers'][i]
+        is_correct = (user_answer == question['correct_answer'])
+        
+        if is_correct:
+            total_score += 1
+            # 学習進捗を更新（正解したらMasteredへ向かう）
+            vocab_idx = df_vocab[df_vocab['ID'] == question['term_id']].index
+            if not vocab_idx.empty:
+                current_progress = df_vocab.loc[vocab_idx[0], '学習進捗 (Progress)']
+                if current_progress == 'Not Started':
+                    df_vocab.loc[vocab_idx[0], '学習進捗 (Progress)'] = 'Learning'
+                elif current_progress == 'Learning':
+                    df_vocab.loc[vocab_idx[0], '学習進捗 (Progress)'] = 'Mastered'
+        else:
+            # 不正解なら学習進捗をLearningに戻す
+            vocab_idx = df_vocab[df_vocab['ID'] == question['term_id']].index
+            if not vocab_idx.empty:
+                df_vocab.loc[vocab_idx[0], '学習進捗 (Progress)'] = 'Learning'
+
+        detailed_results.append({
+            'term_id': question['term_id'],
+            'term': question['term'],
+            'definition': question['definition'],
+            'question_text': question['question_text'],
+            'correct_answer': question['correct_answer'],
+            'user_answer': user_answer,
+            'is_correct': is_correct
+        })
+
+    st.session_state.df_vocab = df_vocab # 更新されたdf_vocabをセッションステートに保存
+    write_data_to_supabase(df_vocab, current_vocab_table_name) # 用語集データも更新
+
+    # テスト結果を保存
+    new_test_result = pd.DataFrame([{
+        'Date': datetime.now(),
+        'Category': test_mode['selected_category'],
+        'TestType': test_mode['test_type'],
+        'Score': total_score,
+        'TotalQuestions': len(test_mode['questions']),
+        'Details': detailed_results # ここがJSONBになる部分
+    }])
+    st.session_state.df_test_results = pd.concat([st.session_state.df_test_results, new_test_result], ignore_index=True)
+    write_data_to_supabase(st.session_state.df_test_results, current_test_results_table_name)
+
+    st.subheader("テスト終了！")
+    st.success(f"あなたのスコア: {total_score} / {len(test_mode['questions'])}")
+    
+    if st.button("詳細結果を見る", key="view_detailed_results"):
+        st.session_state.test_review_mode['active'] = True
+        st.session_state.test_review_mode['review_index'] = 0
+        st.session_state.test_review_mode['results_to_review'] = detailed_results
+        st.session_state.test_mode['active'] = False # テストモードを終了
+        go_to_page("テスト結果") # テスト結果ページに遷移
+
+    if st.button("新しいテストを始める", key="start_new_test_after_finish"):
+        st.session_state.test_mode['active'] = False
+        st.rerun()
+
+    if st.button("用語集に戻る", key="back_to_vocab_list_after_finish"):
+        st.session_state.test_mode['active'] = False
+        go_to_page("用語集")
