@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+env/
+*.log
+*.sqlite3
+*.csv # もしデータがSupabaseに保存されるなら、ローカルのCSVはコミットしない
