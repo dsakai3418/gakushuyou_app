@@ -1,0 +1,6 @@
+# requirements.txt
+streamlit
+pandas
+requests
+# ... 他の必要なライブラリ ...
+st-supabase-connection # この行を追加
