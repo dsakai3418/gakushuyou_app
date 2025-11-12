@@ -525,4 +525,48 @@ else: # ユーザーがログインしている場合
                 st.session_state.test_mode['selected_category'] = st.selectbox(
                     "テストカテゴリを選択", ['全カテゴリ'] + categories, key="test_category_select")
                 
+                # ★★★ ここからコードが途切れていました ★★★
+                # 以下の部分を app25.py に追加してください。
                 st.session_state.test_mode['question_count'] = st.slider(
+                    "出題数", 5, min(len(df_vocab), 50), 
+                    st.session_state.test_mode['question_count'], 
+                    key="test_question_count"
+                )
+                
+                st.session_state.test_mode['test_type'] = st.radio(
+                    "出題形式", 
+                    [
+                        ("用語から説明", "term_to_def"),
+                        ("例文から用語", "example_to_term")
+                    ],
+                    format_func=lambda x: x[0],
+                    key="test_type_radio"
+                )[1] # タプルの2番目の要素 (識別子) を取得
+                
+                st.session_state.test_mode['question_source'] = st.radio(
+                    "問題選択",
+                    [
+                        ("全用語からランダム", "random_all"),
+                        ("学習進捗が「Learning」の用語にフォーカス", "learning_focus")
+                    ],
+                    format_func=lambda x: x[0],
+                    key="question_source_radio"
+                )[1] # タプルの2番目の要素 (識別子) を取得
+
+                if st.button("テスト開始", key="start_test"):
+                    start_test(df_vocab)
+            else:
+                run_test(df_vocab)
+
+    elif st.session_state.current_page == "テスト結果":
+        st.header("📈 テスト結果")
+        # ... (テスト結果表示のロジックが続く) ...
+
+# --- テストモード関連のヘルパー関数 ---
+def start_test(df_vocab):
+    # ... (start_test関数の内容) ...
+
+def run_test(df_vocab):
+    # ... (run_test関数の内容) ...
+
+# ... (その他のヘルパー関数) ...
