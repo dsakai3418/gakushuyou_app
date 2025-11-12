@@ -580,11 +580,6 @@ else: # ユーザーがログインしている場合
                 st.subheader("テスト設定")
                 categories = df_vocab['カテゴリ (Category)'].dropna().unique().tolist()
                 
-                st.session_state.
-            if not st.session_state.test_mode['active']:
-                st.subheader("テスト設定")
-                categories = df_vocab['カテゴリ (Category)'].dropna().unique().tolist()
-                
                 st.session_state.test_mode['selected_category'] = st.selectbox(
                     "テストカテゴリを選択", ['全カテゴリ'] + categories, key="test_category_select")
                 
