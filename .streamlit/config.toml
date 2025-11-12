@@ -1,0 +1,11 @@
+# .streamlit/config.toml
+[server]
+# ウォッチャーが監視するディレクトリの数を減らす
+# デフォルトは src/ (プロジェクトルート) ですが、
+# より具体的に指定することで監視対象を絞り込めます。
+# 例: app.pyがあるディレクトリのみを監視
+folderWatchBlacklist = ["venv", ".git", ".pytest_cache"] # これらはデフォルトで無視されることが多いですが、念のため
+# もしアプリが単一ファイルなら、そのファイルを含むディレクトリに限定することも検討
+# watchForChanges = "true" # これはデフォルト
+# files to watch
+# watchFilePatterns = ["app25.py", "data/*.csv"] # 特定のファイルパターンのみ監視
